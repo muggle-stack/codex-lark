@@ -1,0 +1,54 @@
+#!/usr/bin/expect -f
+
+set timeout 30
+if {[info exists env(SSH_EXPECT_TIMEOUT)] && $env(SSH_EXPECT_TIMEOUT) ne ""} {
+  set timeout $env(SSH_EXPECT_TIMEOUT)
+}
+
+if {$argc < 2} {
+  puts stderr "usage: ssh-exec.exp <user@host> <remote-command>"
+  exit 2
+}
+
+set target [lindex $argv 0]
+set remote_command [lindex $argv 1]
+
+if {[gets stdin password] < 0 || $password eq ""} {
+  puts stderr "missing ssh password on stdin"
+  exit 2
+}
+
+log_user 1
+spawn ssh -tt \
+  -o ConnectTimeout=10 \
+  -o StrictHostKeyChecking=accept-new \
+  -o NumberOfPasswordPrompts=1 \
+  -- $target $remote_command
+
+expect {
+  -re "(?i)are you sure you want to continue connecting" {
+    send -- "yes\r"
+    exp_continue
+  }
+  -re "(?i)(password|passphrase).*:" {
+    send -- "$password\r"
+    exp_continue
+  }
+  -re "(?i)permission denied" {
+    puts stderr "ssh permission denied"
+    exit 255
+  }
+  timeout {
+    puts stderr "ssh timed out"
+    exit 124
+  }
+  eof {
+    set wait_status [wait]
+    set os_error [lindex $wait_status 2]
+    set exit_status [lindex $wait_status 3]
+    if {$os_error == 0} {
+      exit $exit_status
+    }
+    exit 1
+  }
+}

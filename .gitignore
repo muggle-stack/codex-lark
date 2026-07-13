@@ -1,0 +1,10 @@
+.env
+.lark-codex/
+lark-im-resources/
+outputs/
+node_modules/
+npm-debug.log*
+.DS_Store
+*.log
+*.pid
+coverage/

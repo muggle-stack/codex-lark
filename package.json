@@ -1,0 +1,30 @@
+{
+  "name": "codex-lark",
+  "version": "0.1.0",
+  "description": "A local-first bridge that runs Codex from Lark and Feishu messages.",
+  "license": "MIT",
+  "type": "module",
+  "scripts": {
+    "start": "node src/bridge.mjs",
+    "check": "node src/bridge.mjs --check",
+    "check:public": "node scripts/check-public-tree.mjs",
+    "test": "node --test",
+    "setup": "scripts/setup.sh",
+    "skill:install": "scripts/install-skill.sh",
+    "status": "scripts/status.sh",
+    "daemon:start": "scripts/start.sh",
+    "daemon:stop": "scripts/stop.sh",
+    "launchd:install": "scripts/install-launch-agent.sh",
+    "launchd:uninstall": "scripts/uninstall-launch-agent.sh"
+  },
+  "engines": {
+    "node": ">=20"
+  },
+  "keywords": [
+    "codex",
+    "feishu",
+    "lark",
+    "automation",
+    "agent"
+  ]
+}

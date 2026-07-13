@@ -1,0 +1,4 @@
+interface:
+  display_name: "Codex Lark"
+  short_description: "Operate and maintain the local Codex-Lark bridge"
+  default_prompt: "Use $codex-lark to inspect or operate this Codex-Lark bridge safely."

@@ -1,0 +1,55 @@
+<svg xmlns="http://www.w3.org/2000/svg" width="1440" height="820" viewBox="0 0 1440 820">
+  <rect width="1440" height="820" fill="#f5f6f8"/>
+  <rect x="0" y="0" width="1440" height="76" fill="#ffffff"/>
+  <line x1="0" y1="75.5" x2="1440" y2="75.5" stroke="#dfe2e7"/>
+  <circle cx="45" cy="38" r="18" fill="#101828"/>
+  <text x="45" y="44" text-anchor="middle" font-family="Arial, PingFang SC, sans-serif" font-size="18" font-weight="700" fill="#ffffff">C</text>
+  <text x="78" y="35" font-family="Arial, PingFang SC, sans-serif" font-size="19" font-weight="700" fill="#1d2939">codex-lark</text>
+  <text x="78" y="56" font-family="Arial, PingFang SC, sans-serif" font-size="12" fill="#667085">脱敏界面示意 · 私聊</text>
+
+  <rect x="755" y="116" width="604" height="78" rx="8" fill="#dce9ff"/>
+  <text x="784" y="150" font-family="Arial, PingFang SC, sans-serif" font-size="18" fill="#1d2939">/codex @release 分析 CI 失败，修复后跑测试</text>
+  <text x="784" y="177" font-family="Arial, PingFang SC, sans-serif" font-size="13" fill="#667085">10:42</text>
+  <rect x="1186" y="202" width="112" height="30" rx="15" fill="#ffffff" stroke="#cfd5dd"/>
+  <text x="1201" y="222" font-family="Arial, PingFang SC, sans-serif" font-size="13" fill="#475467">⌨ Typing</text>
+
+  <rect x="80" y="270" width="940" height="470" rx="8" fill="#ffffff" stroke="#d6dae1"/>
+  <rect x="80" y="270" width="940" height="74" rx="8" fill="#eaf8ef"/>
+  <rect x="80" y="336" width="940" height="8" fill="#eaf8ef"/>
+  <circle cx="119" cy="307" r="9" fill="#12b76a"/>
+  <text x="142" y="315" font-family="Arial, PingFang SC, sans-serif" font-size="22" font-weight="700" fill="#14532d">Codex 正在执行</text>
+  <rect x="837" y="290" width="146" height="34" rx="17" fill="#ffffff"/>
+  <text x="862" y="312" font-family="Arial, PingFang SC, sans-serif" font-size="14" font-weight="700" fill="#027a48">运行中 · 32s</text>
+
+  <text x="116" y="386" font-family="Arial, PingFang SC, sans-serif" font-size="13" font-weight="700" fill="#667085">任务</text>
+  <text x="116" y="418" font-family="Arial, PingFang SC, sans-serif" font-size="17" fill="#1d2939">分析 release Session 中的 CI 失败，完成修复并运行测试</text>
+
+  <line x1="116" y1="450" x2="984" y2="450" stroke="#e4e7ec"/>
+  <text x="116" y="486" font-family="Arial, PingFang SC, sans-serif" font-size="13" font-weight="700" fill="#667085">最近进度</text>
+
+  <circle cx="126" cy="522" r="6" fill="#12b76a"/>
+  <text x="150" y="528" font-family="Arial, PingFang SC, sans-serif" font-size="15" fill="#344054">10:42:03 已接收任务并恢复 Session release</text>
+  <circle cx="126" cy="562" r="6" fill="#12b76a"/>
+  <text x="150" y="568" font-family="Arial, PingFang SC, sans-serif" font-size="15" fill="#344054">10:42:08 已读取失败日志，定位到配置回归</text>
+  <circle cx="126" cy="602" r="6" fill="#12b76a"/>
+  <text x="150" y="608" font-family="Arial, PingFang SC, sans-serif" font-size="15" fill="#344054">10:42:21 已修改 2 个文件</text>
+  <circle cx="126" cy="642" r="7" fill="#f79009"/>
+  <text x="150" y="648" font-family="Arial, PingFang SC, sans-serif" font-size="15" font-weight="700" fill="#344054">10:42:32 正在运行 npm test</text>
+
+  <rect x="1060" y="270" width="300" height="264" rx="8" fill="#ffffff" stroke="#d6dae1"/>
+  <text x="1090" y="310" font-family="Arial, PingFang SC, sans-serif" font-size="16" font-weight="700" fill="#1d2939">Managed Sessions</text>
+  <line x1="1090" y1="330" x2="1330" y2="330" stroke="#e4e7ec"/>
+  <text x="1090" y="366" font-family="Arial, PingFang SC, sans-serif" font-size="13" fill="#667085">ALIAS</text>
+  <text x="1208" y="366" font-family="Arial, PingFang SC, sans-serif" font-size="13" fill="#667085">STATUS</text>
+  <text x="1090" y="402" font-family="Arial, PingFang SC, sans-serif" font-size="15" font-weight="700" fill="#344054">release</text>
+  <rect x="1208" y="383" width="84" height="28" rx="14" fill="#fff4e5"/>
+  <text x="1230" y="402" font-family="Arial, PingFang SC, sans-serif" font-size="13" fill="#b54708">running</text>
+  <text x="1090" y="447" font-family="Arial, PingFang SC, sans-serif" font-size="15" font-weight="700" fill="#344054">docs</text>
+  <rect x="1208" y="428" width="64" height="28" rx="14" fill="#ecfdf3"/>
+  <text x="1228" y="447" font-family="Arial, PingFang SC, sans-serif" font-size="13" fill="#027a48">idle</text>
+  <text x="1090" y="492" font-family="Arial, PingFang SC, sans-serif" font-size="15" font-weight="700" fill="#344054">alice</text>
+  <rect x="1208" y="473" width="64" height="28" rx="14" fill="#ecfdf3"/>
+  <text x="1228" y="492" font-family="Arial, PingFang SC, sans-serif" font-size="13" fill="#027a48">idle</text>
+
+  <text x="1080" y="704" font-family="Arial, PingFang SC, sans-serif" font-size="13" fill="#667085">同一张卡片持续更新 · 不刷屏 · 无需公网域名</text>
+</svg>
