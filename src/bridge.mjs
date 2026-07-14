@@ -1,11 +1,18 @@
 #!/usr/bin/env node
 
 import { spawn } from "node:child_process";
-import { createHash } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { createServer } from "node:http";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+
+import { permissionFromCodexSandbox, permissionToClaude } from "./permission.mjs";
+import {
+  discoverClaudeSessions,
+  isLikelyClaudeSessionId,
+  runClaudeTurn,
+} from "./engines/claude.mjs";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, "..");
@@ -47,6 +54,17 @@ const CONFIG = {
   sessionBackend: normalizeSessionBackend(env("LARK_CODEX_SESSION_BACKEND", "app-server")) || "app-server",
   appServerTimeoutMs: Number.parseInt(env("LARK_CODEX_APP_SERVER_TIMEOUT_MS", "1800000"), 10),
   appServerApprovalPolicy: env("LARK_CODEX_APP_SERVER_APPROVAL_POLICY", env("LARK_CODEX_APPROVAL_POLICY", "never")),
+  engine: normalizeEngine(env("LARK_CODEX_ENGINE", "codex")),
+  claudeBin: env("LARK_CLAUDE_BIN", "claude"),
+  claudeModel: env("LARK_CLAUDE_MODEL", "sonnet"),
+  claudeWorkdirBase: resolve(env("LARK_CLAUDE_WORKDIR_BASE", join(process.env.HOME || ".", ".cc-lark"))),
+  claudeTimeoutMs: Number.parseInt(env("LARK_CLAUDE_TIMEOUT_MS", "1800000"), 10),
+  claudeSandboxEnabled: envBool("LARK_CLAUDE_SANDBOX_ENABLED", true),
+  claudeStrictSandbox: envBool("LARK_CLAUDE_STRICT_SANDBOX", true),
+  claudeReadonlyAllowedTools: envList("LARK_CLAUDE_READONLY_ALLOWED_TOOLS"),
+  claudeNetworkAllowedDomains: envList("LARK_CLAUDE_NETWORK_ALLOWED_DOMAINS"),
+  claudeCredentialsDeny: envList("LARK_CLAUDE_CREDENTIALS_DENY"),
+  claudeExtraArgs: splitArgs(env("LARK_CLAUDE_EXTRA_ARGS", "")),
   replyInThread: envBool("LARK_CODEX_REPLY_IN_THREAD", true),
   maxReplyChars: Number.parseInt(env("LARK_CODEX_MAX_REPLY_CHARS", "3500"), 10),
   startedReplyEnabled: envBool("LARK_CODEX_STARTED_REPLY_ENABLED", true),
@@ -163,11 +181,20 @@ async function main() {
 
 async function checkSetup(auth) {
   await runCommand("lark-cli", ["event", "schema", "im.message.receive_v1", "--json"], { cwd: rootDir });
-  await runCommand("codex", ["exec", "--help"], { cwd: rootDir });
-  await runCommand("codex", ["app-server", "--help"], { cwd: rootDir });
   console.log("[check] lark-cli event schema: ok");
-  console.log("[check] codex exec: ok");
-  console.log("[check] codex app-server: ok");
+  console.log(`[check] engine: ${CONFIG.engine}`);
+  if (CONFIG.engine === "claude") {
+    await runCommand(CONFIG.claudeBin, ["--version"], { cwd: rootDir });
+    console.log(`[check] claude bin: ${CONFIG.claudeBin} ok`);
+    console.log(`[check] claude model: ${CONFIG.claudeModel}`);
+    console.log(`[check] claude workdir base: ${CONFIG.claudeWorkdirBase}`);
+    console.log(`[check] claude sandbox: ${CONFIG.claudeSandboxEnabled ? `on${CONFIG.claudeStrictSandbox ? ", strict" : ""}` : "off"}`);
+  } else {
+    await runCommand("codex", ["exec", "--help"], { cwd: rootDir });
+    await runCommand("codex", ["app-server", "--help"], { cwd: rootDir });
+    console.log("[check] codex exec: ok");
+    console.log("[check] codex app-server: ok");
+  }
   console.log(`[check] bot: ${auth?.identities?.bot?.appName || "unknown"} (${auth?.identities?.bot?.openId || "unknown"})`);
   console.log(`[check] allowed senders: ${CONFIG.allowAll ? "ALL" : CONFIG.allowedSenders.join(", ") || "(none)"}`);
   console.log(`[check] allowed chats: ${CONFIG.allowedChats.join(", ") || "(any)"}`);
@@ -1201,7 +1228,17 @@ async function runSessionNewTask(event, command) {
 
   const startedAt = Date.now();
   const reportProgress = (message) => appendRunEvent(runDir, "progress", message);
-  const result = command.backend === "app-server"
+  const result = CONFIG.engine === "claude"
+    ? await runClaudeEngineTurn({
+      mode: "new",
+      sessionId: randomUUID(),
+      prompt,
+      cwd: command.cwd,
+      level: permissionFromCodexSandbox(command.sandbox),
+      model: command.model,
+      onProgress: reportProgress,
+    })
+    : command.backend === "app-server"
     ? await runCodexAppServerTurn({
       cwd: command.cwd,
       sandbox: command.sandbox,
@@ -1241,6 +1278,8 @@ async function runSessionNewTask(event, command) {
   latestRegistry.sessions[command.alias] = {
     alias: command.alias,
     title: command.alias,
+    engine: CONFIG.engine,
+    permission: permissionFromCodexSandbox(command.sandbox),
     backend: command.backend,
     session_id: result.threadId,
     cwd: command.cwd,
@@ -1320,7 +1359,16 @@ async function runSessionSendTask(event, command) {
 
   const startedAt = Date.now();
   const reportProgress = (message) => appendRunEvent(runDir, "progress", message);
-  const result = backend === "app-server"
+  const result = (session.engine || CONFIG.engine) === "claude"
+    ? await runClaudeSessionTurn({
+      sessionId: session.session_id,
+      prompt,
+      cwd: session.cwd || CONFIG.workdir,
+      level: session.permission || permissionFromCodexSandbox(session.sandbox),
+      model: session.model || "",
+      onProgress: reportProgress,
+    })
+    : backend === "app-server"
     ? await runCodexAppServerTurn({
       threadId: session.session_id,
       cwd: session.cwd || CONFIG.workdir,
@@ -1383,10 +1431,13 @@ async function runP2PAutoReplySessionTask(event, prompt, options = {}) {
   const eventPath = join(runDir, "event.json");
   writeFileSync(eventPath, `${JSON.stringify(event, null, 2)}\n`);
   writeFileSync(promptPath, prompt);
+  const p2pCwd = CONFIG.engine === "claude"
+    ? claudeWorkdirForSender(event.sender_id)
+    : CONFIG.p2pAutoReplySessionWorkdir;
   const runState = initRunViewerState(runDir, runId, event, extractLarkBridgeTask(prompt) || extractMessageText(event) || "P2P auto-reply task", options, {
     kind: "p2p-session",
-    backend: CONFIG.p2pAutoReplySessionBackend,
-    cwd: CONFIG.p2pAutoReplySessionWorkdir,
+    backend: CONFIG.engine === "claude" ? "claude" : CONFIG.p2pAutoReplySessionBackend,
+    cwd: p2pCwd,
   });
 
   const now = new Date().toISOString();
@@ -1394,9 +1445,11 @@ async function runP2PAutoReplySessionTask(event, prompt, options = {}) {
   const session = {
     alias,
     title: existing.title || p2pAutoReplySessionTitle(event.sender_id),
+    engine: CONFIG.engine,
+    permission: existing.permission || permissionFromCodexSandbox(CONFIG.p2pAutoReplySessionSandbox),
     backend: normalizeSessionBackend(existing.backend) || CONFIG.p2pAutoReplySessionBackend,
     session_id: existing.session_id || "",
-    cwd: CONFIG.p2pAutoReplySessionWorkdir,
+    cwd: p2pCwd,
     sandbox: CONFIG.p2pAutoReplySessionSandbox,
     model: existing.model || CONFIG.p2pAutoReplySessionModel || "",
     created_at: existing.created_at || now,
@@ -1422,7 +1475,16 @@ async function runP2PAutoReplySessionTask(event, prompt, options = {}) {
     const startedAt = Date.now();
     const backend = normalizeSessionBackend(session.backend) || CONFIG.p2pAutoReplySessionBackend;
     const reportProgress = (message) => appendRunEvent(runDir, "progress", message);
-    const result = session.session_id
+    const result = CONFIG.engine === "claude"
+      ? await runClaudeSessionTurn({
+        sessionId: session.session_id,
+        prompt,
+        cwd: session.cwd,
+        level: session.permission || permissionFromCodexSandbox(session.sandbox),
+        model: session.model,
+        onProgress: reportProgress,
+      })
+      : session.session_id
       ? backend === "app-server"
         ? await runCodexAppServerTurn({
           threadId: session.session_id,
@@ -1466,6 +1528,8 @@ async function runP2PAutoReplySessionTask(event, prompt, options = {}) {
     latest.updated_at = new Date().toISOString();
     latest.backend = backend;
     latest.session_id = result.threadId || latest.session_id || "";
+    latest.engine = CONFIG.engine;
+    latest.permission = session.permission;
     latest.cwd = session.cwd;
     latest.sandbox = session.sandbox;
     latest.model = session.model;
@@ -1703,28 +1767,12 @@ async function runCodexTask(event, userPrompt, options = {}) {
         appendRunEvent(runDir, "reaction", `已给触发消息添加 ${startedReaction.emojiType} 表情`);
       }
       if (CONFIG.startedReplyEnabled) {
-        await reply(event, `Codex started.\n\n\`${firstLine(userPrompt, 180)}\``, "started", options);
+        await reply(event, `${engineAssistantLabel()} started.\n\n\`${firstLine(userPrompt, 180)}\``, "started", options);
       }
     }
     await maybeSendRunStatusCard(event, runDir, runState, options);
     writeRunStatus(runDir, { status: "running", started_at: new Date().toISOString() });
     appendRunEvent(runDir, "status", "Codex 开始执行");
-
-    const args = [
-      "exec",
-      "--json",
-      "--skip-git-repo-check",
-      "--cd",
-      CONFIG.workdir,
-      "--sandbox",
-      CONFIG.sandbox,
-      "-o",
-      responsePath,
-    ];
-    if (CONFIG.model) args.push("--model", CONFIG.model);
-    args.push(...CONFIG.extraArgs);
-    appendCodexExecImageArgs(args, options.images || []);
-    args.push(prompt);
 
     const startedAt = Date.now();
     const progress = createProgressReporter(event, options, {
@@ -1732,17 +1780,45 @@ async function runCodexTask(event, userPrompt, options = {}) {
       startedAt,
       runDir,
     });
-    const result = await runCodexExecWithProgress(args, {
-      cwd: CONFIG.workdir,
-      env: process.env,
-      maxBuffer: 10 * 1024 * 1024,
-      timeoutMs: effectiveExecTimeoutMs(),
-      onProgress: (message) => progress.update(message),
-    });
+    let result;
+    if (CONFIG.engine === "claude") {
+      result = await runClaudeEngineTurn({
+        mode: "oneshot",
+        sessionId: randomUUID(),
+        prompt,
+        cwd: CONFIG.workdir,
+        level: permissionFromCodexSandbox(CONFIG.sandbox),
+        model: CONFIG.claudeModel,
+        onProgress: (message) => progress.update(message),
+      });
+    } else {
+      const args = [
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--cd",
+        CONFIG.workdir,
+        "--sandbox",
+        CONFIG.sandbox,
+        "-o",
+        responsePath,
+      ];
+      if (CONFIG.model) args.push("--model", CONFIG.model);
+      args.push(...CONFIG.extraArgs);
+      appendCodexExecImageArgs(args, options.images || []);
+      args.push(prompt);
+      result = await runCodexExecWithProgress(args, {
+        cwd: CONFIG.workdir,
+        env: process.env,
+        maxBuffer: 10 * 1024 * 1024,
+        timeoutMs: effectiveExecTimeoutMs(),
+        onProgress: (message) => progress.update(message),
+      });
+    }
     await progress.stop();
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
-    writeFileSync(stdoutPath, result.stdout);
-    writeFileSync(stderrPath, result.stderr);
+    writeFileSync(stdoutPath, result.stdout || "");
+    writeFileSync(stderrPath, result.stderr || "");
 
     if (result.code !== 0) {
       const errorText = tail(result.stderr || result.stdout, 3000);
@@ -1750,17 +1826,18 @@ async function runCodexTask(event, userPrompt, options = {}) {
       appendRunEvent(runDir, "failed", `Codex 失败，exit ${result.code}`, { elapsed_sec: elapsedSec });
       await reply(
         event,
-        `Codex failed after ${elapsedSec}s (exit ${result.code}).\n\n${codeBlock(errorText)}`,
+        `${engineAssistantLabel()} failed after ${elapsedSec}s (exit ${result.code}).\n\n${codeBlock(errorText)}`,
         "failed",
         options,
       );
       return;
     }
 
-    const finalMessage = existsSync(responsePath)
-      ? readFileSync(responsePath, "utf8").trim()
-      : tail(result.stdout, 3500).trim();
-    const finalPrefix = options.finalPrefix ?? `Codex finished in ${elapsedSec}s.\n\n`;
+    const finalMessage = (result.finalMessage || "").trim()
+      || (existsSync(responsePath)
+        ? readFileSync(responsePath, "utf8").trim()
+        : tail(result.stdout || "", 3500).trim());
+    const finalPrefix = options.finalPrefix ?? `${engineAssistantLabel()} finished in ${elapsedSec}s.\n\n`;
     writeRunStatus(runDir, { status: "completed", elapsed_sec: elapsedSec, final_message: redactSensitiveSessionText(finalMessage || "") });
     appendRunEvent(runDir, "completed", `Codex 完成，用时 ${elapsedSec}s`);
     await reply(event, `${finalPrefix}${finalMessage || "(no final message)"}`, "done", options);
@@ -2317,7 +2394,7 @@ function buildP2PAutoReplyPrompt(message, text, recentContext = []) {
       ]
     : [];
   const configuredSkills = CONFIG.knowledgeSkills.length > 0
-    ? [`- Use these configured Codex skills when available: ${CONFIG.knowledgeSkills.map((name) => `$${name}`).join(", ")}.`]
+    ? [`- Use these configured ${engineAssistantLabel()} skills when available: ${CONFIG.knowledgeSkills.map((name) => formatSkillRef(name)).join(", ")}.`]
     : [];
   const knowledgeHint = CONFIG.knowledgeBaseHint
     ? [`- Knowledge source hint: ${CONFIG.knowledgeBaseHint}`]
@@ -2690,6 +2767,82 @@ async function readAuthStatus() {
     throw new Error(`lark-cli auth status failed: ${tail(result.stderr || result.stdout, 2000)}`);
   }
   return JSON.parse(result.stdout);
+}
+
+// ---- Claude Code engine glue ------------------------------------------------
+// The Codex functions below are unchanged. When CONFIG.engine === "claude",
+// the call sites route through these helpers instead, which adapt the Claude
+// engine's result to the same { code, stdout, stderr, finalMessage, threadId }
+// shape the bridge already expects.
+
+function claudePermissionOpts(cwd) {
+  return {
+    cwd,
+    readonlyAllowedTools: CONFIG.claudeReadonlyAllowedTools.length
+      ? CONFIG.claudeReadonlyAllowedTools
+      : ["Read", "Glob", "Grep", "Bash"],
+    networkAllowedDomains: CONFIG.claudeNetworkAllowedDomains,
+    credentialsDeny: CONFIG.claudeCredentialsDeny.length
+      ? CONFIG.claudeCredentialsDeny
+      : ["~/.ssh", "~/.aws"],
+    strictSandbox: CONFIG.claudeStrictSandbox,
+    sandboxEnabled: CONFIG.claudeSandboxEnabled,
+  };
+}
+
+// Per-user working directory for Claude sessions: <base>/<sanitized open_id>.
+function claudeWorkdirForSender(senderId) {
+  const safe = String(senderId || "anon").replace(/[^A-Za-z0-9._-]/g, "_") || "anon";
+  return join(CONFIG.claudeWorkdirBase, safe);
+}
+
+function engineAssistantLabel() {
+  return CONFIG.engine === "claude" ? "Claude" : CONFIG.assistantName;
+}
+
+// Skill invocation syntax differs per engine: Codex uses `$name`, Claude `/name`.
+function formatSkillRef(name) {
+  return CONFIG.engine === "claude" ? `/${name}` : `$${name}`;
+}
+
+async function runClaudeEngineTurn({ mode, sessionId, prompt, cwd, level, model, onProgress }) {
+  try {
+    mkdirSync(cwd, { recursive: true });
+  } catch {
+    /* best effort; claude will surface a real error if cwd is unusable */
+  }
+  const permission = permissionToClaude(level, claudePermissionOpts(cwd));
+  const res = await runClaudeTurn({
+    mode,
+    sessionId,
+    prompt,
+    cwd,
+    permission,
+    model: model || CONFIG.claudeModel,
+    extraArgs: CONFIG.claudeExtraArgs,
+    timeoutMs: CONFIG.claudeTimeoutMs,
+    bin: CONFIG.claudeBin,
+    onProgress: onProgress || (() => {}),
+  });
+  return {
+    code: res.ok ? 0 : (res.code || 1),
+    stdout: res.stdout || "",
+    stderr: res.stderr || res.error || "",
+    finalMessage: res.finalMessage || "",
+    threadId: res.sessionId || sessionId || "",
+    sessionMissing: Boolean(res.sessionMissing),
+  };
+}
+
+// Resume a stored Claude session, falling back to a fresh session id when the
+// stored transcript is gone (e.g. pruned by Claude's 30-day retention).
+async function runClaudeSessionTurn({ sessionId, prompt, cwd, level, model, onProgress }) {
+  if (sessionId && isLikelyClaudeSessionId(sessionId)) {
+    const resumed = await runClaudeEngineTurn({ mode: "resume", sessionId, prompt, cwd, level, model, onProgress });
+    if (!resumed.sessionMissing) return resumed;
+    if (onProgress) onProgress("原会话已失效，正在新建 Claude session");
+  }
+  return runClaudeEngineTurn({ mode: "new", sessionId: randomUUID(), prompt, cwd, level, model, onProgress });
 }
 
 function runCommand(command, args, options = {}) {
@@ -3375,10 +3528,14 @@ function loadSessionRegistry() {
   }
   try {
     const payload = JSON.parse(readFileSync(sessionRegistryPath, "utf8"));
-    return {
-      version: 1,
-      sessions: payload && typeof payload.sessions === "object" && payload.sessions ? payload.sessions : {},
-    };
+    const sessions = payload && typeof payload.sessions === "object" && payload.sessions ? payload.sessions : {};
+    // Migrate legacy records to the neutral engine/permission fields.
+    for (const session of Object.values(sessions)) {
+      if (!session || typeof session !== "object") continue;
+      if (!session.engine) session.engine = "codex";
+      if (!session.permission) session.permission = permissionFromCodexSandbox(session.sandbox);
+    }
+    return { version: 1, sessions };
   } catch (error) {
     console.error(`[bridge] failed to read session registry: ${error.message}`);
     return { version: 1, sessions: {} };
@@ -3437,7 +3594,60 @@ function formatSessionStatus(registry, options = {}) {
   return sections.join("\n\n");
 }
 
+// Aggregate Claude sessions across the bridge's known working directories:
+// an explicit --cwd, every registry cwd, and each per-user dir under the base.
+function discoverClaudeSessionsForBridge(options = {}) {
+  const limit = options.limit || 20;
+  const cwds = new Set();
+  if (options.cwd) cwds.add(options.cwd);
+  for (const session of Object.values(loadSessionRegistry().sessions)) {
+    if ((session.engine || "codex") === "claude" && session.cwd) cwds.add(session.cwd);
+  }
+  try {
+    for (const name of readdirSync(CONFIG.claudeWorkdirBase)) {
+      const path = join(CONFIG.claudeWorkdirBase, name);
+      try {
+        if (statSync(path).isDirectory()) cwds.add(path);
+      } catch {
+        /* ignore unreadable entries */
+      }
+    }
+  } catch {
+    /* base dir may not exist yet */
+  }
+  const all = [];
+  for (const cwd of cwds) all.push(...discoverClaudeSessions({ cwd, limit }));
+  all.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return all.slice(0, limit);
+}
+
+function formatDiscoveredClaudeSessions(registry, options = {}) {
+  const sessions = discoverClaudeSessionsForBridge(options);
+  if (sessions.length === 0) {
+    return [
+      `No local Claude sessions found under \`${CONFIG.claudeWorkdirBase}\`${options.cwd ? ` for \`${options.cwd}\`` : ""}.`,
+      "",
+      "This only scans local Claude transcript metadata; it does not create or resume anything.",
+    ].join("\n");
+  }
+  const rows = sessions.map((session) => [
+    aliasForSessionId(registry, session.sessionId),
+    session.title || "",
+    session.sessionId,
+    session.cwd || "",
+    formatRelativeTime(new Date(session.mtimeMs).toISOString()),
+  ]);
+  return [
+    `Local Claude sessions${options.cwd ? ` for \`${options.cwd}\`` : ""}:`,
+    "",
+    table(["alias", "title", "session_id", "cwd", "updated"], rows),
+    "",
+    `Alias one with: \`${CONFIG.triggerPrefix} sess-alias <session_id> Lark-1 --cd <cwd> --title "title"\``,
+  ].join("\n");
+}
+
 function formatDiscoveredCodexSessions(registry, options = {}) {
+  if (CONFIG.engine === "claude") return formatDiscoveredClaudeSessions(registry, options);
   const sessions = discoverCodexSessions(options);
   if (sessions.length === 0) {
     return [
@@ -3882,6 +4092,11 @@ function normalizeP2PSessionMode(value) {
   const mode = String(value || "").trim();
   if (mode === "per_sender" || mode === "one-off") return mode;
   return "one-off";
+}
+
+function normalizeEngine(value) {
+  const v = String(value || "").trim().toLowerCase();
+  return v === "claude" ? "claude" : "codex";
 }
 
 function normalizeSessionBackend(value) {
