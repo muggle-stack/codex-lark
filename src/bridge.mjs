@@ -46,6 +46,7 @@ const CONFIG = {
   dynamicCardEventChars: Number.parseInt(env("LARK_CODEX_DYNAMIC_CARD_EVENT_CHARS", "700"), 10),
   dynamicCardFinalChars: Number.parseInt(env("LARK_CODEX_DYNAMIC_CARD_FINAL_CHARS", "2000"), 10),
   dynamicCardSuppressProgressMessages: envBool("LARK_CODEX_DYNAMIC_CARD_SUPPRESS_PROGRESS_MESSAGES", true),
+  dynamicCardShowResult: envBool("LARK_CODEX_DYNAMIC_CARD_SHOW_RESULT", true),
   runViewerEnabled: envBool("LARK_CODEX_RUN_VIEWER_ENABLED", true),
   runViewerHost: env("LARK_CODEX_RUN_VIEWER_HOST", "127.0.0.1"),
   runViewerPort: Number.parseInt(env("LARK_CODEX_RUN_VIEWER_PORT", "8765"), 10),
@@ -423,7 +424,7 @@ function buildRunStatusCard(status, events = []) {
     : status.status === "completed"
       ? status.final_message || status.last_event || ""
       : "";
-  if (finalText) {
+  if (finalText && CONFIG.dynamicCardShowResult) {
     elements.push({
       tag: "div",
       text: { tag: "lark_md", content: `**${status.status === "failed" ? "错误" : "结果"}**\n${compactProgressText(finalText, effectiveDynamicCardFinalChars())}` },
