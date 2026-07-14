@@ -55,7 +55,9 @@ const CONFIG = {
   appServerTimeoutMs: Number.parseInt(env("LARK_CODEX_APP_SERVER_TIMEOUT_MS", "1800000"), 10),
   appServerApprovalPolicy: env("LARK_CODEX_APP_SERVER_APPROVAL_POLICY", env("LARK_CODEX_APPROVAL_POLICY", "never")),
   engine: normalizeEngine(env("LARK_CODEX_ENGINE", "codex")),
+  botEventsEnabled: envBool("LARK_CODEX_BOT_EVENTS_ENABLED", true),
   claudeBin: env("LARK_CLAUDE_BIN", "claude"),
+  claudeSettingSources: envList("LARK_CLAUDE_SETTING_SOURCES"),
   claudeModel: env("LARK_CLAUDE_MODEL", "sonnet"),
   claudeWorkdirBase: resolve(env("LARK_CLAUDE_WORKDIR_BASE", join(process.env.HOME || ".", ".cc-lark"))),
   claudeTimeoutMs: Number.parseInt(env("LARK_CLAUDE_TIMEOUT_MS", "1800000"), 10),
@@ -175,7 +177,11 @@ async function main() {
 
   printStartup(auth);
   startRunViewerServer();
-  startEventConsumer();
+  if (CONFIG.botEventsEnabled) {
+    startEventConsumer();
+  } else {
+    console.log("[bridge] bot event stream disabled (LARK_CODEX_BOT_EVENTS_ENABLED=0)");
+  }
   startP2PAutoReplyPoller();
 }
 
@@ -2812,6 +2818,12 @@ async function runClaudeEngineTurn({ mode, sessionId, prompt, cwd, level, model,
     /* best effort; claude will surface a real error if cwd is unusable */
   }
   const permission = permissionToClaude(level, claudePermissionOpts(cwd));
+  // Operator override: e.g. LARK_CLAUDE_SETTING_SOURCES=project sheds the host
+  // user's personal ~/.claude hooks/plugins/output-style (mem0 status line,
+  // caveman replies, etc.) while keeping the login credentials.
+  if (CONFIG.claudeSettingSources.length) {
+    permission.settingSources = CONFIG.claudeSettingSources;
+  }
   const res = await runClaudeTurn({
     mode,
     sessionId,
