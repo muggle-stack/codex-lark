@@ -27,9 +27,13 @@ export function claudeProjectSlug(cwd) {
 
 // Build the `claude` argv (excluding the prompt, which is fed on stdin).
 // `permission` is the object returned by permissionToClaude().
-export function buildClaudeArgs({ mode = "oneshot", sessionId = "", model = "", permission = {}, extraArgs = [] } = {}) {
+export function buildClaudeArgs({ mode = "oneshot", sessionId = "", model = "", permission = {}, extraArgs = [], appendSystemPrompt = "", appendSystemPromptFile = "" } = {}) {
   const args = ["-p", "--output-format", "stream-json", "--verbose"];
   if (model) args.push("--model", model);
+  // System-level guardrail: a fixed policy the user's message cannot override,
+  // because it enters as the system role rather than the user turn.
+  if (appendSystemPrompt) args.push("--append-system-prompt", appendSystemPrompt);
+  if (appendSystemPromptFile) args.push("--append-system-prompt-file", appendSystemPromptFile);
 
   if (mode === "resume") {
     if (!sessionId) throw new Error("claude resume requires a sessionId");
@@ -123,13 +127,15 @@ export function runClaudeTurn(options = {}) {
     permission = {},
     model = "",
     extraArgs = [],
+    appendSystemPrompt = "",
+    appendSystemPromptFile = "",
     timeoutMs = 30 * 60 * 1000,
     bin = "claude",
     env = process.env,
     onProgress = () => {},
   } = options;
 
-  const args = buildClaudeArgs({ mode, sessionId, model, permission, extraArgs });
+  const args = buildClaudeArgs({ mode, sessionId, model, permission, extraArgs, appendSystemPrompt, appendSystemPromptFile });
 
   return new Promise((resolvePromise) => {
     let child;
