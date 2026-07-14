@@ -79,6 +79,7 @@ const CONFIG = {
   workdir: resolve(env("LARK_CODEX_WORKDIR", process.cwd())),
   sandbox: env("LARK_CODEX_SANDBOX", "workspace-write"),
   model: env("LARK_CODEX_MODEL", ""),
+  engine: env("LARK_CODEX_ENGINE", "codex"),
   extraArgs: splitArgs(env("LARK_CODEX_EXTRA_ARGS", "")),
   execTimeoutMs: Number.parseInt(env("LARK_CODEX_EXEC_TIMEOUT_MS", "1800000"), 10),
   progressEnabled: envBool("LARK_CODEX_PROGRESS_ENABLED", true),
@@ -216,11 +217,17 @@ async function main() {
 
 async function checkSetup(auth) {
   await runCommand("lark-cli", ["event", "schema", "im.message.receive_v1", "--json"], { cwd: rootDir });
-  await runCommand("codex", ["exec", "--help"], { cwd: rootDir });
-  await runCommand("codex", ["app-server", "--help"], { cwd: rootDir });
-  console.log("[check] lark-cli event schema: ok");
-  console.log("[check] codex exec: ok");
-  console.log("[check] codex app-server: ok");
+  if (CONFIG.engine === "claude") {
+    await runCommand("claude", ["--version"], { cwd: rootDir });
+    console.log("[check] lark-cli event schema: ok");
+    console.log("[check] claude: ok");
+  } else {
+    await runCommand("codex", ["exec", "--help"], { cwd: rootDir });
+    await runCommand("codex", ["app-server", "--help"], { cwd: rootDir });
+    console.log("[check] lark-cli event schema: ok");
+    console.log("[check] codex exec: ok");
+    console.log("[check] codex app-server: ok");
+  }
   console.log(`[check] bot: ${auth?.identities?.bot?.appName || "unknown"} (${auth?.identities?.bot?.openId || "unknown"})`);
   console.log(`[check] allowed senders: ${CONFIG.allowAll ? "ALL" : CONFIG.allowedSenders.join(", ") || "(none)"}`);
   console.log(`[check] allowed chats: ${CONFIG.allowedChats.join(", ") || "(any)"}`);
@@ -1254,16 +1261,18 @@ async function runSessionNewTask(event, command) {
 
   const startedAt = Date.now();
   const reportProgress = (message) => appendRunEvent(runDir, "progress", message);
-  const result = command.backend === "app-server"
-    ? await runCodexAppServerTurn({
-      cwd: command.cwd,
-      sandbox: command.sandbox,
-      model: command.model,
-      prompt,
-      runId,
-      onProgress: reportProgress,
-    })
-    : await runCodexExecNewSession({ ...command, prompt }, responsePath);
+  const result = CONFIG.engine === "claude"
+    ? await runClaudeExecNewSession({ ...command, prompt, onProgress: reportProgress }, responsePath)
+    : command.backend === "app-server"
+      ? await runCodexAppServerTurn({
+        cwd: command.cwd,
+        sandbox: command.sandbox,
+        model: command.model,
+        prompt,
+        runId,
+        onProgress: reportProgress,
+      })
+      : await runCodexExecNewSession({ ...command, prompt }, responsePath);
   const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
   writeFileSync(stdoutPath, result.stdout);
   writeFileSync(stderrPath, result.stderr);
@@ -1373,17 +1382,21 @@ async function runSessionSendTask(event, command) {
 
   const startedAt = Date.now();
   const reportProgress = (message) => appendRunEvent(runDir, "progress", message);
-  const result = backend === "app-server"
-    ? await runCodexAppServerTurn({
-      threadId: session.session_id,
-      cwd: session.cwd || CONFIG.workdir,
-      sandbox: session.sandbox || CONFIG.sandbox,
-      model: session.model || "",
-      prompt,
-      runId,
-      onProgress: reportProgress,
-    })
-    : await runCodexExecResume(session, prompt, responsePath);
+  const result = CONFIG.engine === "claude"
+    ? session.session_id
+      ? await runClaudeExecResume({ ...session, onProgress: reportProgress }, prompt, responsePath)
+      : await runClaudeExecNewSession({ cwd: session.cwd || CONFIG.workdir, model: session.model || "", prompt, images: [], onProgress: reportProgress }, responsePath)
+    : backend === "app-server"
+      ? await runCodexAppServerTurn({
+        threadId: session.session_id,
+        cwd: session.cwd || CONFIG.workdir,
+        sandbox: session.sandbox || CONFIG.sandbox,
+        model: session.model || "",
+        prompt,
+        runId,
+        onProgress: reportProgress,
+      })
+      : await runCodexExecResume(session, prompt, responsePath);
   const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
   writeFileSync(stdoutPath, result.stdout);
   writeFileSync(stderrPath, result.stderr);
@@ -1475,36 +1488,40 @@ async function runP2PAutoReplySessionTask(event, prompt, options = {}) {
     const startedAt = Date.now();
     const backend = normalizeSessionBackend(session.backend) || CONFIG.p2pAutoReplySessionBackend;
     const reportProgress = (message) => appendRunEvent(runDir, "progress", message);
-    const result = session.session_id
-      ? backend === "app-server"
-        ? await runCodexAppServerTurn({
-          threadId: session.session_id,
-          cwd: session.cwd,
-          sandbox: session.sandbox,
-          model: session.model,
-          prompt,
-          runId,
-          images: options.images || [],
-          onProgress: reportProgress,
-        })
-        : await runCodexExecResume({ ...session, images: options.images || [] }, prompt, responsePath)
-      : backend === "app-server"
-        ? await runCodexAppServerTurn({
-          cwd: session.cwd,
-          sandbox: session.sandbox,
-          model: session.model,
-          prompt,
-          runId,
-          images: options.images || [],
-          onProgress: reportProgress,
-        })
-        : await runCodexExecNewSession({
-          cwd: session.cwd,
-          sandbox: session.sandbox,
-          model: session.model,
-          prompt,
-          images: options.images || [],
-        }, responsePath);
+    const result = CONFIG.engine === "claude"
+      ? session.session_id
+        ? await runClaudeExecResume({ ...session, images: options.images || [], onProgress: reportProgress }, prompt, responsePath)
+        : await runClaudeExecNewSession({ cwd: session.cwd, model: session.model, prompt, images: options.images || [], onProgress: reportProgress }, responsePath)
+      : session.session_id
+        ? backend === "app-server"
+          ? await runCodexAppServerTurn({
+            threadId: session.session_id,
+            cwd: session.cwd,
+            sandbox: session.sandbox,
+            model: session.model,
+            prompt,
+            runId,
+            images: options.images || [],
+            onProgress: reportProgress,
+          })
+          : await runCodexExecResume({ ...session, images: options.images || [] }, prompt, responsePath)
+        : backend === "app-server"
+          ? await runCodexAppServerTurn({
+            cwd: session.cwd,
+            sandbox: session.sandbox,
+            model: session.model,
+            prompt,
+            runId,
+            images: options.images || [],
+            onProgress: reportProgress,
+          })
+          : await runCodexExecNewSession({
+            cwd: session.cwd,
+            sandbox: session.sandbox,
+            model: session.model,
+            prompt,
+            images: options.images || [],
+          }, responsePath);
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
     writeFileSync(stdoutPath, result.stdout || "");
     writeFileSync(stderrPath, result.stderr || "");
@@ -1744,7 +1761,7 @@ async function runCodexTask(event, userPrompt, options = {}) {
   writeFileSync(promptPath, prompt);
   const runState = initRunViewerState(runDir, runId, event, userPrompt, options, {
     kind: "one-off",
-    backend: "codex exec",
+    backend: CONFIG.engine === "claude" ? "claude" : "codex exec",
     cwd: CONFIG.workdir,
   });
 
@@ -1756,28 +1773,13 @@ async function runCodexTask(event, userPrompt, options = {}) {
         appendRunEvent(runDir, "reaction", `已给触发消息添加 ${startedReaction.emojiType} 表情`);
       }
       if (CONFIG.startedReplyEnabled) {
-        await reply(event, `Codex started.\n\n\`${firstLine(userPrompt, 180)}\``, "started", options);
+        const engineLabel = CONFIG.engine === "claude" ? "Claude" : "Codex";
+        await reply(event, `${engineLabel} started.\n\n\`${firstLine(userPrompt, 180)}\``, "started", options);
       }
     }
     await maybeSendRunStatusCard(event, runDir, runState, options);
     writeRunStatus(runDir, { status: "running", started_at: new Date().toISOString() });
-    appendRunEvent(runDir, "status", "Codex 开始执行");
-
-    const args = [
-      "exec",
-      "--json",
-      "--skip-git-repo-check",
-      "--cd",
-      CONFIG.workdir,
-      "--sandbox",
-      CONFIG.sandbox,
-      "-o",
-      responsePath,
-    ];
-    if (CONFIG.model) args.push("--model", CONFIG.model);
-    args.push(...CONFIG.extraArgs);
-    appendCodexExecImageArgs(args, options.images || []);
-    args.push(prompt);
+    appendRunEvent(runDir, "status", `${CONFIG.engine === "claude" ? "Claude" : "Codex"} 开始执行`);
 
     const startedAt = Date.now();
     const progress = createProgressReporter(event, options, {
@@ -1785,25 +1787,57 @@ async function runCodexTask(event, userPrompt, options = {}) {
       startedAt,
       runDir,
     });
-    const result = await runCodexExecWithProgress(args, {
-      cwd: CONFIG.workdir,
-      env: process.env,
-      maxBuffer: 10 * 1024 * 1024,
-      timeoutMs: effectiveExecTimeoutMs(),
-      onProgress: (message) => progress.update(message),
-    });
+
+    let result;
+    if (CONFIG.engine === "claude") {
+      result = await runClaudeExecWithProgress(prompt, {
+        cwd: CONFIG.workdir,
+        model: CONFIG.model,
+        images: options.images || [],
+        env: process.env,
+        maxBuffer: 10 * 1024 * 1024,
+        timeoutMs: effectiveExecTimeoutMs(),
+        onProgress: (message) => progress.update(message),
+      });
+      if (result.finalMessage) writeFileSync(responsePath, result.finalMessage);
+    } else {
+      const args = [
+        "exec",
+        "--json",
+        "--skip-git-repo-check",
+        "--cd",
+        CONFIG.workdir,
+        "--sandbox",
+        CONFIG.sandbox,
+        "-o",
+        responsePath,
+      ];
+      if (CONFIG.model) args.push("--model", CONFIG.model);
+      args.push(...CONFIG.extraArgs);
+      appendCodexExecImageArgs(args, options.images || []);
+      args.push(prompt);
+      result = await runCodexExecWithProgress(args, {
+        cwd: CONFIG.workdir,
+        env: process.env,
+        maxBuffer: 10 * 1024 * 1024,
+        timeoutMs: effectiveExecTimeoutMs(),
+        onProgress: (message) => progress.update(message),
+      });
+    }
+
     await progress.stop();
     const elapsedSec = Math.round((Date.now() - startedAt) / 1000);
     writeFileSync(stdoutPath, result.stdout);
     writeFileSync(stderrPath, result.stderr);
 
+    const engineLabel = CONFIG.engine === "claude" ? "Claude" : "Codex";
     if (result.code !== 0) {
       const errorText = tail(result.stderr || result.stdout, 3000);
       writeRunStatus(runDir, { status: "failed", elapsed_sec: elapsedSec, error: redactSensitiveSessionText(errorText) });
-      appendRunEvent(runDir, "failed", `Codex 失败，exit ${result.code}`, { elapsed_sec: elapsedSec });
+      appendRunEvent(runDir, "failed", `${engineLabel} 失败，exit ${result.code}`, { elapsed_sec: elapsedSec });
       await reply(
         event,
-        `Codex failed after ${elapsedSec}s (exit ${result.code}).\n\n${codeBlock(errorText)}`,
+        `${engineLabel} failed after ${elapsedSec}s (exit ${result.code}).\n\n${codeBlock(errorText)}`,
         "failed",
         options,
       );
@@ -1813,9 +1847,9 @@ async function runCodexTask(event, userPrompt, options = {}) {
     const finalMessage = existsSync(responsePath)
       ? readFileSync(responsePath, "utf8").trim()
       : tail(result.stdout, 3500).trim();
-    const finalPrefix = options.finalPrefix ?? `Codex finished in ${elapsedSec}s.\n\n`;
+    const finalPrefix = options.finalPrefix ?? `${engineLabel} finished in ${elapsedSec}s.\n\n`;
     writeRunStatus(runDir, { status: "completed", elapsed_sec: elapsedSec, final_message: redactSensitiveSessionText(finalMessage || "") });
-    appendRunEvent(runDir, "completed", `Codex 完成，用时 ${elapsedSec}s`);
+    appendRunEvent(runDir, "completed", `${engineLabel} 完成，用时 ${elapsedSec}s`);
     await reply(event, `${finalPrefix}${finalMessage || "(no final message)"}`, "done", options);
   } finally {
     await removeMessageReactions(cleanupReactions);
@@ -3435,6 +3469,146 @@ function parseCodexJsonl(stdout) {
     }
   }
   return { threadId, lastAgentMessage };
+}
+
+function parseClaudeStreamJson(stdout) {
+  let sessionId = "";
+  let finalMessage = "";
+  for (const line of String(stdout || "").split(/\r?\n/)) {
+    if (!line.trim()) continue;
+    try {
+      const item = JSON.parse(line);
+      if (item.type === "result" && item.session_id) {
+        sessionId = item.session_id;
+        finalMessage = item.result || finalMessage;
+      }
+    } catch {
+      // non-JSON lines are plain text progress
+    }
+  }
+  return { sessionId, finalMessage };
+}
+
+function runClaudeExecWithProgress(prompt, options = {}) {
+  return new Promise((resolvePromise) => {
+    // --permission-mode bypassPermissions lets `claude -p` run non-interactively
+    // (Codex's equivalent is --sandbox); without it the CLI blocks on approvals.
+    const args = ["-p", prompt, "--output-format", "stream-json", "--verbose", "--permission-mode", "bypassPermissions"];
+    if (options.model) args.push("--model", options.model);
+    if (options.sessionId) args.push("--resume", options.sessionId);
+    // This claude CLI has no image-attach flag; note skipped images instead of
+    // passing an unsupported arg that would fail the whole run.
+    const skippedImages = (options.images || []).filter((img) => {
+      const p = String(img?.path || "").trim();
+      return p && existsSync(p);
+    }).length;
+    if (skippedImages > 0 && options.onProgress) {
+      options.onProgress(`Claude: 跳过 ${skippedImages} 张图片（当前 claude CLI 不支持图片输入）`);
+    }
+
+    // spawnCommand handles the Windows .cmd shim + window hiding; detached:true
+    // is kept for POSIX process-group kill (spawnCommand disables it on Windows).
+    const child = spawnCommand("claude", args, {
+      cwd: options.cwd || CONFIG.workdir,
+      env: options.env || process.env,
+      stdio: ["ignore", "pipe", "pipe"],
+      detached: true,
+    });
+
+    let stdout = "";
+    let stderr = "";
+    let textBuffer = "";
+    let finished = false;
+    let timedOut = false;
+    const maxBuffer = options.maxBuffer || 20 * 1024 * 1024;
+    const timeoutMs = Number.isFinite(options.timeoutMs) && options.timeoutMs > 0 ? options.timeoutMs : 1_800_000;
+    const timeout = setTimeout(() => {
+      timedOut = true;
+      stderr = appendLimited(stderr, `claude timed out after ${Math.round(timeoutMs / 1000)}s\n`, maxBuffer);
+      killProcessGroup(child, "SIGTERM");
+      setTimeout(() => killProcessGroup(child, "SIGKILL"), 5000).unref();
+    }, timeoutMs);
+
+    child.stdout.setEncoding("utf8");
+    child.stderr.setEncoding("utf8");
+
+    child.stdout.on("data", (chunk) => {
+      stdout = appendLimited(stdout, chunk, maxBuffer);
+      textBuffer += chunk;
+      let idx;
+      while ((idx = textBuffer.indexOf("\n")) >= 0) {
+        const line = textBuffer.slice(0, idx).trim();
+        textBuffer = textBuffer.slice(idx + 1);
+        if (!line) continue;
+        try {
+          const item = JSON.parse(line);
+          if (item.type === "assistant" && Array.isArray(item.message?.content)) {
+            for (const block of item.message.content) {
+              if (block.type === "text" && block.text && options.onProgress) {
+                options.onProgress(`Claude: ${compactProgressText(block.text, 180)}`);
+              }
+            }
+          }
+        } catch {
+          // non-JSON line, ignore
+        }
+      }
+    });
+
+    child.stderr.on("data", (chunk) => {
+      stderr = appendLimited(stderr, chunk, maxBuffer);
+    });
+
+    child.on("close", (code) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      const { sessionId, finalMessage } = parseClaudeStreamJson(stdout);
+      resolvePromise({
+        code: timedOut ? 124 : (code ?? 1),
+        stdout,
+        stderr,
+        sessionId,
+        finalMessage,
+      });
+    });
+
+    child.on("error", (err) => {
+      if (finished) return;
+      finished = true;
+      clearTimeout(timeout);
+      resolvePromise({ code: 1, stdout, stderr: `${err.message}\n${stderr}`, sessionId: "", finalMessage: "" });
+    });
+  });
+}
+
+async function runClaudeExecNewSession(command, responsePath) {
+  const result = await runClaudeExecWithProgress(command.prompt, {
+    cwd: command.cwd,
+    model: command.model,
+    images: command.images,
+    env: process.env,
+    maxBuffer: 20 * 1024 * 1024,
+    onProgress: command.onProgress,
+  });
+  const finalMessage = result.finalMessage || tail(result.stdout, 3500).trim();
+  if (finalMessage && responsePath) writeFileSync(responsePath, finalMessage);
+  return { ...result, threadId: result.sessionId, finalMessage };
+}
+
+async function runClaudeExecResume(session, prompt, responsePath) {
+  const result = await runClaudeExecWithProgress(prompt, {
+    cwd: session.cwd || CONFIG.workdir,
+    model: session.model,
+    sessionId: session.session_id,
+    images: session.images,
+    env: process.env,
+    maxBuffer: 20 * 1024 * 1024,
+    onProgress: session.onProgress,
+  });
+  const finalMessage = result.finalMessage || tail(result.stdout, 3500).trim();
+  if (finalMessage && responsePath) writeFileSync(responsePath, finalMessage);
+  return { ...result, threadId: result.sessionId || session.session_id, finalMessage };
 }
 
 function loadSessionRegistry() {
