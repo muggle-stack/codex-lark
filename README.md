@@ -32,6 +32,23 @@
 
 Owner 和同事白名单是两套独立配置。不要把同事加入 `LARK_CODEX_OWNER_SENDERS`。
 
+## 引擎选择(Codex / Claude Code)
+
+现在支持可插拔引擎,用 `LARK_CODEX_ENGINE` 切换:
+
+- `codex`(默认):行为不变,驱动 Codex CLI(`exec` / `app-server`)。
+- `claude`:驱动 Claude Code,通过 `claude -p --resume` 每轮起一个进程——不常驻、不需要开机自启,零系统侵入。
+
+```dotenv
+LARK_CODEX_ENGINE=claude
+LARK_CLAUDE_MODEL=sonnet
+LARK_CLAUDE_WORKDIR_BASE=~/.cc-lark
+```
+
+权限仍复用 `LARK_CODEX_SANDBOX` 那套词汇,映射到中立三档:`read-only`→只读、`workspace-write`→可写、`danger-full-access`→全权。同事只读知识代理在 Claude 引擎下由**两层**强制:操作系统沙盒(bubblewrap,文件系统只读)+ 禁用 `Write`/`Edit` 工具 + 凭据 deny,二者缺一不可;Linux 需要 `bubblewrap` 与 `socat`。
+
+每个飞书用户对应一个预生成的 Claude session UUID(首轮 `--session-id`,之后 `--resume`),工作目录默认 `~/.cc-lark/<open_id>`,会话记录落在 `~/.claude/projects/`。完整配置见 [docs/CONFIGURATION.md](docs/CONFIGURATION.md)。
+
 ## 快速开始
 
 ### 1. 准备环境
