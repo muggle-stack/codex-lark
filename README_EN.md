@@ -25,7 +25,7 @@
 
 ## Quick Start
 
-Requirements: Node.js 20+, an authenticated Codex CLI, current `lark-cli`, and a Lark custom app with bot capability enabled.
+Requirements: Node.js 20+, an authenticated Codex CLI (default) or Claude CLI (when `LARK_CODEX_ENGINE=claude`), current `lark-cli`, and a Lark custom app with bot capability enabled.
 
 ```bash
 lark-cli update
@@ -38,6 +38,24 @@ npm run setup -- --owner-open-id ou_your_open_id --workdir "$HOME/workspace"
 npm run check
 npm start
 ```
+
+### Execution Engine (Codex or Claude)
+
+Select the backend via `LARK_CODEX_ENGINE` (defaults to `codex`):
+
+```bash
+# .env
+LARK_CODEX_ENGINE=codex    # Default, uses codex CLI
+# or
+LARK_CODEX_ENGINE=claude   # Uses claude CLI
+```
+
+- `codex`: Supports managed sessions, Codex Desktop sync, and image inputs.
+- `claude`: Requires the `claude` CLI installed and authenticated (run `claude` once for `/login`, or set `ANTHROPIC_API_KEY`). No image input.
+
+You can also override the default per task via trigger word: `/codex <task>` uses Codex, `/claude <task>` uses Claude. The trigger override applies to one-off tasks only; `sess-*` managed-session commands always use the `LARK_CODEX_ENGINE` default.
+
+
 
 On macOS, user authorization and LaunchAgent installation can be combined:
 

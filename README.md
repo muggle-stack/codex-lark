@@ -37,7 +37,7 @@ Owner 和同事白名单是两套独立配置。不要把同事加入 `LARK_CODE
 ### 1. 准备环境
 
 - Node.js 20+
-- 已登录的 Codex CLI
+- 已登录的 Codex CLI（默认引擎），或已认证的 Claude CLI（`LARK_CODEX_ENGINE=claude` 时）
 - 最新版 `lark-cli`
 - 一个已启用机器人能力的飞书 / Lark 自建应用
 
@@ -45,6 +45,23 @@ Owner 和同事白名单是两套独立配置。不要把同事加入 `LARK_CODE
 lark-cli update
 lark-cli config init --new
 ```
+
+### 执行引擎（Codex 或 Claude）
+
+用 `LARK_CODEX_ENGINE` 选择后端，默认 `codex`：
+
+```bash
+# .env
+LARK_CODEX_ENGINE=codex    # 默认，使用 codex CLI
+# 或
+LARK_CODEX_ENGINE=claude   # 使用 claude CLI
+```
+
+- `codex`：支持长期 Session、Codex Desktop 同步和图片输入。
+- `claude`：需单独安装并认证 `claude` CLI（`claude` 跑一次完成 `/login`，或设 `ANTHROPIC_API_KEY`）。不支持图片输入。
+
+也可用触发词临时覆盖默认引擎：`/codex <任务>` 用 Codex，`/claude <任务>` 用 Claude。触发词覆盖只作用于一次性任务；`sess-*` 长期会话命令始终使用默认引擎 `LARK_CODEX_ENGINE`。
+
 
 ### 2. 配置飞书应用
 

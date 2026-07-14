@@ -12,12 +12,16 @@ const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, "..");
 const isWindows = process.platform === "win32";
 
-// On Windows, npm-installed CLIs (lark-cli, codex) are `.cmd` shims that Node
-// cannot launch by bare name. Using `shell: true` works for simple args but
-// cmd.exe strips embedded double quotes, corrupting the JSON payloads we pass
-// to lark-cli (--content, --data). Instead we resolve each shim to the Node
-// script it wraps and spawn `node <script> ...args` directly: no shell, so the
-// args array is passed verbatim and JSON survives intact.
+// On Windows, npm-installed CLIs are `.cmd` shims that Node cannot launch by
+// bare name. Using `shell: true` works for simple args but cmd.exe strips
+// embedded double quotes, corrupting the JSON payloads and quoted prompts we
+// pass through (lark-cli --content/--data, claude -p "..."). Instead we read
+// each shim and resolve the real target it invokes, then spawn it directly
+// (no shell), so the args array is passed verbatim.
+//
+// Shims come in two shapes:
+//   node ".../foo.js" %*        (lark-cli, codex)  -> spawn node with the script
+//   ".../foo.exe"     %*        (claude)           -> spawn the exe directly
 const windowsCommandCache = new Map();
 
 function resolveWindowsCommand(command) {
@@ -29,11 +33,17 @@ function resolveWindowsCommand(command) {
     if (!existsSync(cmdPath)) continue;
     try {
       const shim = readFileSync(cmdPath, "utf8");
-      const match = shim.match(/"%dp0%[\\/]([^"]+\.js)"/i);
+      // Only inspect the invocation line (the one passing %* to the target).
+      // Earlier lines like `IF EXIST "%dp0%\node.exe"` are setup, not the
+      // target, and would otherwise mis-match as the executable.
+      const execLine = shim.split(/\r?\n/).find((line) => line.includes("%*")) || "";
+      const match = execLine.match(/"%dp0%[\\/]([^"]+\.(?:js|exe))"/i);
       if (match) {
-        const scriptPath = join(dir, match[1].replace(/\\/g, "/"));
-        if (existsSync(scriptPath)) {
-          resolved = scriptPath;
+        const targetPath = join(dir, match[1].replace(/\\/g, "/"));
+        if (existsSync(targetPath)) {
+          resolved = targetPath.toLowerCase().endsWith(".exe")
+            ? { kind: "exe", path: targetPath }
+            : { kind: "node", path: targetPath };
           break;
         }
       }
@@ -51,9 +61,12 @@ function spawnCommand(command, args, options = {}) {
     // nothing: process-group kill (kill(-pid)) is POSIX-only, so killProcessGroup
     // already falls back to child.kill() here. Force it off and hide the window.
     const winOptions = { ...options, detached: false, windowsHide: true };
-    const script = resolveWindowsCommand(command);
-    if (script) {
-      return spawn(process.execPath, [script, ...args], winOptions);
+    const target = resolveWindowsCommand(command);
+    if (target?.kind === "node") {
+      return spawn(process.execPath, [target.path, ...args], winOptions);
+    }
+    if (target?.kind === "exe") {
+      return spawn(target.path, args, winOptions);
     }
     // No shim found; spawn command directly (no shell). If it's an .exe/.cmd on
     // PATH, Node will find it. Fail-closed: never use shell:true since these
@@ -80,6 +93,7 @@ const CONFIG = {
   sandbox: env("LARK_CODEX_SANDBOX", "workspace-write"),
   model: env("LARK_CODEX_MODEL", ""),
   engine: env("LARK_CODEX_ENGINE", "codex"),
+  claudeModel: env("LARK_CODEX_CLAUDE_MODEL", ""),
   extraArgs: splitArgs(env("LARK_CODEX_EXTRA_ARGS", "")),
   execTimeoutMs: Number.parseInt(env("LARK_CODEX_EXEC_TIMEOUT_MS", "1800000"), 10),
   progressEnabled: envBool("LARK_CODEX_PROGRESS_ENABLED", true),
@@ -349,6 +363,7 @@ function initRunViewerState(runDir, runId, event, taskText, options = {}, metada
     status: "queued",
     kind: metadata.kind || "task",
     backend: metadata.backend || "",
+    engine_label: metadata.engineLabel || "",
     cwd: metadata.cwd || "",
     session_alias: metadata.session_alias || "",
     created_at: new Date().toISOString(),
@@ -1035,11 +1050,32 @@ function handleEventLine(line) {
     return;
   }
 
-  state.queue.push({ event, prompt: decision.prompt, options: {} });
+  state.queue.push({ event, prompt: decision.prompt, options: { engine: decision.engine } });
   if (state.queue.length > 1) {
     void reply(event, `Codex queue: ${state.queue.length - 1} task(s) ahead of this one.`, "queued");
   }
   void drainQueue();
+}
+
+// Per-trigger engine routing: `/codex ...` forces the codex engine and
+// `/claude ...` forces the claude engine, regardless of the configured default.
+// Any other trigger (LARK_CODEX_TRIGGER_PREFIX / owner triggers / mentions)
+// uses CONFIG.engine. Returns { engine, prompt } if a fixed-engine trigger
+// matched, else null.
+const ENGINE_TRIGGERS = [
+  { trigger: "/codex", engine: "codex" },
+  { trigger: "/claude", engine: "claude" },
+];
+
+function matchEngineTrigger(content) {
+  const trimmed = String(content || "").trim();
+  for (const { trigger, engine } of ENGINE_TRIGGERS) {
+    if (trimmed === trigger) return { engine, prompt: "", bare: true };
+    if (trimmed.startsWith(`${trigger} `)) {
+      return { engine, prompt: trimmed.slice(trigger.length).trim(), bare: false };
+    }
+  }
+  return null;
 }
 
 function decide(event) {
@@ -1053,17 +1089,24 @@ function decide(event) {
     if (isUnauthorizedKnowledgeTriggerText(content)) {
       return { run: false, reply: CONFIG.p2pUnauthorizedReplyMessage };
     }
-    if (content.startsWith(CONFIG.triggerPrefix)) {
-      return { run: false, reply: "This sender is not allowed to run Codex on this host." };
+    if (content.startsWith(CONFIG.triggerPrefix) || matchEngineTrigger(content)) {
+      return { run: false, reply: "This sender is not allowed to run tasks on this host." };
     }
     return { run: false };
   }
 
   let prompt = "";
-  if (content === CONFIG.triggerPrefix) {
+  let forcedEngine = null;
+  const engineTrigger = matchEngineTrigger(content);
+  if (engineTrigger) {
+    if (engineTrigger.bare) {
+      return { run: false, reply: `Usage: /${engineTrigger.engine} <task>` };
+    }
+    prompt = engineTrigger.prompt;
+    forcedEngine = engineTrigger.engine;
+  } else if (content === CONFIG.triggerPrefix) {
     return { run: false, reply: `Usage: ${CONFIG.triggerPrefix} <task>` };
-  }
-  if (content.startsWith(`${CONFIG.triggerPrefix} `)) {
+  } else if (content.startsWith(`${CONFIG.triggerPrefix} `)) {
     prompt = content.slice(CONFIG.triggerPrefix.length).trim();
   } else if (isOwnerSender(event.sender_id)) {
     const ownerPrompt = stripOwnerTrigger(content);
@@ -1094,7 +1137,9 @@ function decide(event) {
   }
   const command = parseBridgeCommand(prompt);
   if (command) return { run: false, command };
-  return { run: true, prompt };
+  // Fixed-engine trigger (/codex, /claude) overrides the configured default;
+  // everything else uses CONFIG.engine.
+  return { run: true, prompt, engine: forcedEngine || CONFIG.engine };
 }
 
 function promptFromMention(content) {
@@ -1745,6 +1790,11 @@ async function runCodexTask(event, userPrompt, options = {}) {
   const cleanupReactions = Array.isArray(options.cleanupReactions)
     ? options.cleanupReactions.filter(Boolean)
     : [];
+  // Engine is chosen per task (from the trigger word) and falls back to the
+  // configured default when the caller did not specify one.
+  const engine = options.engine || CONFIG.engine;
+  const isClaude = engine === "claude";
+  const engineLabel = isClaude ? "Claude" : "Codex";
   const runId = makeRunId(event);
   const runDir = join(runRoot, runId);
   mkdirSync(runDir, { recursive: true });
@@ -1761,7 +1811,8 @@ async function runCodexTask(event, userPrompt, options = {}) {
   writeFileSync(promptPath, prompt);
   const runState = initRunViewerState(runDir, runId, event, userPrompt, options, {
     kind: "one-off",
-    backend: CONFIG.engine === "claude" ? "claude" : "codex exec",
+    backend: isClaude ? "claude" : "codex exec",
+    engineLabel,
     cwd: CONFIG.workdir,
   });
 
@@ -1773,26 +1824,26 @@ async function runCodexTask(event, userPrompt, options = {}) {
         appendRunEvent(runDir, "reaction", `已给触发消息添加 ${startedReaction.emojiType} 表情`);
       }
       if (CONFIG.startedReplyEnabled) {
-        const engineLabel = CONFIG.engine === "claude" ? "Claude" : "Codex";
         await reply(event, `${engineLabel} started.\n\n\`${firstLine(userPrompt, 180)}\``, "started", options);
       }
     }
     await maybeSendRunStatusCard(event, runDir, runState, options);
     writeRunStatus(runDir, { status: "running", started_at: new Date().toISOString() });
-    appendRunEvent(runDir, "status", `${CONFIG.engine === "claude" ? "Claude" : "Codex"} 开始执行`);
+    appendRunEvent(runDir, "status", `${engineLabel} 开始执行`);
 
     const startedAt = Date.now();
     const progress = createProgressReporter(event, options, {
       enabled: shouldSendProgress(event, options),
       startedAt,
       runDir,
+      engineLabel,
     });
 
     let result;
-    if (CONFIG.engine === "claude") {
+    if (isClaude) {
       result = await runClaudeExecWithProgress(prompt, {
         cwd: CONFIG.workdir,
-        model: CONFIG.model,
+        model: CONFIG.claudeModel,
         images: options.images || [],
         env: process.env,
         maxBuffer: 10 * 1024 * 1024,
@@ -1830,7 +1881,6 @@ async function runCodexTask(event, userPrompt, options = {}) {
     writeFileSync(stdoutPath, result.stdout);
     writeFileSync(stderrPath, result.stderr);
 
-    const engineLabel = CONFIG.engine === "claude" ? "Claude" : "Codex";
     if (result.code !== 0) {
       const errorText = tail(result.stderr || result.stdout, 3000);
       writeRunStatus(runDir, { status: "failed", elapsed_sec: elapsedSec, error: redactSensitiveSessionText(errorText) });
@@ -2925,7 +2975,7 @@ function createProgressReporter(event, options = {}, settings = {}) {
   const pending = new Set();
   let stopped = false;
   let count = 0;
-  let lastProgress = "Codex 已启动";
+  let lastProgress = `${settings.engineLabel || CONFIG.assistantName} 已启动`;
   let lastSentAt = 0;
   const initialDelayMs = effectiveProgressInitialDelayMs();
   const intervalMs = effectiveProgressIntervalMs();
@@ -2958,7 +3008,7 @@ function createProgressReporter(event, options = {}, settings = {}) {
     lastSentAt = now;
     count += 1;
     const elapsed = Math.max(1, Math.round((now - startedAt) / 1000));
-    const body = `${CONFIG.assistantName} 进度（${elapsed}s）：${compactProgressText(message || lastProgress)}`;
+    const body = `${settings.engineLabel || CONFIG.assistantName} 进度（${elapsed}s）：${compactProgressText(message || lastProgress)}`;
     if (runDir) {
       appendRunEvent(runDir, "progress", message || lastProgress, { elapsed_sec: elapsed });
     }
@@ -3478,9 +3528,12 @@ function parseClaudeStreamJson(stdout) {
     if (!line.trim()) continue;
     try {
       const item = JSON.parse(line);
-      if (item.type === "result" && item.session_id) {
-        sessionId = item.session_id;
-        finalMessage = item.result || finalMessage;
+      // Capture session_id and the final result independently: an error result
+      // (or one missing session_id) still carries the text we want to surface,
+      // so don't gate finalMessage on session_id being present.
+      if (item.type === "result") {
+        if (item.session_id) sessionId = item.session_id;
+        if (typeof item.result === "string" && item.result) finalMessage = item.result;
       }
     } catch {
       // non-JSON lines are plain text progress
@@ -4176,9 +4229,13 @@ function shortId(id) {
 function runStatusTitle(status) {
   const kind = String(status?.kind || "");
   if (kind === "p2p-session") return CONFIG.knowledgeAgentName;
-  if (kind === "session-new") return `${CONFIG.assistantName} 会话创建`;
-  if (kind === "session-send") return `${CONFIG.assistantName} 会话执行`;
-  return `${CONFIG.assistantName} 正在干活`;
+  // Prefer the per-task engine label (set for one-off tasks so /codex and
+  // /claude show the engine that actually ran), falling back to the configured
+  // assistant name for sessions and legacy runs.
+  const name = status?.engine_label || CONFIG.assistantName;
+  if (kind === "session-new") return `${name} 会话创建`;
+  if (kind === "session-send") return `${name} 会话执行`;
+  return `${name} 正在干活`;
 }
 
 function runStatusText(status) {
@@ -4630,6 +4687,7 @@ export {
   extractMessageText,
   firstUsefulSessionText,
   isSameOrChildPath,
+  matchEngineTrigger,
   parseBridgeCommand,
   redactSensitiveSessionText,
   splitArgs,

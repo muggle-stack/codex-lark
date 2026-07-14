@@ -5,6 +5,7 @@ import {
   cleanPrompt,
   firstUsefulSessionText,
   isSameOrChildPath,
+  matchEngineTrigger,
   parseBridgeCommand,
   redactSensitiveSessionText,
   splitArgs,
@@ -60,6 +61,26 @@ test("splitText bounds message chunks", () => {
 test("workspace containment does not accept sibling prefixes", () => {
   assert.equal(isSameOrChildPath("/tmp/work/repo", "/tmp/work"), true);
   assert.equal(isSameOrChildPath("/tmp/work-other", "/tmp/work"), false);
+});
+
+test("matchEngineTrigger routes /codex and /claude to fixed engines", () => {
+  assert.deepEqual(matchEngineTrigger("/codex build the app"), {
+    engine: "codex",
+    prompt: "build the app",
+    bare: false,
+  });
+  assert.deepEqual(matchEngineTrigger("/claude fix the bug"), {
+    engine: "claude",
+    prompt: "fix the bug",
+    bare: false,
+  });
+  // Bare trigger with no task
+  assert.deepEqual(matchEngineTrigger("/claude"), { engine: "claude", prompt: "", bare: true });
+  // Non-engine triggers and substrings do not match
+  assert.equal(matchEngineTrigger("/ask-codex something"), null);
+  assert.equal(matchEngineTrigger("/codextra task"), null);
+  assert.equal(matchEngineTrigger("just a normal message"), null);
+  assert.equal(matchEngineTrigger(""), null);
 });
 
 test("workspace containment rejects parent traversal and cross-drive paths", () => {
