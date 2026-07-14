@@ -3,12 +3,63 @@
 import { spawn } from "node:child_process";
 import { createHash } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
 import { createServer } from "node:http";
-import { basename, dirname, join, resolve } from "node:path";
+import { basename, dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
 const rootDir = resolve(__dirname, "..");
+const isWindows = process.platform === "win32";
+
+// On Windows, npm-installed CLIs (lark-cli, codex) are `.cmd` shims that Node
+// cannot launch by bare name. Using `shell: true` works for simple args but
+// cmd.exe strips embedded double quotes, corrupting the JSON payloads we pass
+// to lark-cli (--content, --data). Instead we resolve each shim to the Node
+// script it wraps and spawn `node <script> ...args` directly: no shell, so the
+// args array is passed verbatim and JSON survives intact.
+const windowsCommandCache = new Map();
+
+function resolveWindowsCommand(command) {
+  if (windowsCommandCache.has(command)) return windowsCommandCache.get(command);
+  let resolved = null;
+  for (const dir of String(process.env.PATH || "").split(";")) {
+    if (!dir) continue;
+    const cmdPath = join(dir, `${command}.cmd`);
+    if (!existsSync(cmdPath)) continue;
+    try {
+      const shim = readFileSync(cmdPath, "utf8");
+      const match = shim.match(/"%dp0%[\\/]([^"]+\.js)"/i);
+      if (match) {
+        const scriptPath = join(dir, match[1].replace(/\\/g, "/"));
+        if (existsSync(scriptPath)) {
+          resolved = scriptPath;
+          break;
+        }
+      }
+    } catch {
+      // Unreadable shim; keep scanning PATH.
+    }
+  }
+  windowsCommandCache.set(command, resolved);
+  return resolved;
+}
+
+function spawnCommand(command, args, options = {}) {
+  if (isWindows) {
+    // `detached: true` opens a separate console window on Windows and buys us
+    // nothing: process-group kill (kill(-pid)) is POSIX-only, so killProcessGroup
+    // already falls back to child.kill() here. Force it off and hide the window.
+    const winOptions = { ...options, detached: false, windowsHide: true };
+    const script = resolveWindowsCommand(command);
+    if (script) {
+      return spawn(process.execPath, [script, ...args], winOptions);
+    }
+    // No shim found (command may already be an .exe on PATH); fall back to shell.
+    return spawn(command, args, { ...winOptions, shell: true });
+  }
+  return spawn(command, args, options);
+}
 
 loadDotEnv(join(rootDir, ".env"));
 
@@ -97,7 +148,7 @@ const CONFIG = {
 const runRoot = join(rootDir, ".lark-codex", "runs");
 const p2pStatePath = join(rootDir, ".lark-codex", "p2p-auto-reply-state.json");
 const sessionRegistryPath = join(rootDir, ".lark-codex", "sessions.json");
-const codexHome = resolve(process.env.CODEX_HOME || join(process.env.HOME || ".", ".codex"));
+const codexHome = resolve(process.env.CODEX_HOME || join(homedir(), ".codex"));
 const codexSessionsRoot = join(codexHome, "sessions");
 const codexSessionIndexPath = join(codexHome, "session_index.jsonl");
 const codexGlobalStatePath = join(codexHome, ".codex-global-state.json");
@@ -910,7 +961,7 @@ function startEventConsumer() {
     // Keep detached/background runs alive even when the parent shell has no stdin.
   }, 60_000);
 
-  const child = spawn("lark-cli", ["event", "consume", "im.message.receive_v1", "--as", "bot"], {
+  const child = spawnCommand("lark-cli", ["event", "consume", "im.message.receive_v1", "--as", "bot"], {
     cwd: rootDir,
     env: process.env,
     stdio: ["pipe", "pipe", "pipe"],
@@ -2694,7 +2745,7 @@ async function readAuthStatus() {
 
 function runCommand(command, args, options = {}) {
   return new Promise((resolvePromise) => {
-    const child = spawn(command, args, {
+    const child = spawnCommand(command, args, {
       cwd: options.cwd || rootDir,
       env: options.env || process.env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -2728,7 +2779,7 @@ function runCommand(command, args, options = {}) {
 
 function runCodexExecWithProgress(args, options = {}) {
   return new Promise((resolvePromise) => {
-    const child = spawn("codex", args, {
+    const child = spawnCommand("codex", args, {
       cwd: options.cwd || CONFIG.workdir,
       env: options.env || process.env,
       stdio: ["ignore", "pipe", "pipe"],
@@ -3062,7 +3113,7 @@ function buildAppServerUserInput(prompt, images = []) {
 
 function runCodexAppServerTurn(options) {
   return new Promise((resolvePromise) => {
-    const child = spawn("codex", ["app-server", "--stdio"], {
+    const child = spawnCommand("codex", ["app-server", "--stdio"], {
       cwd: options.cwd || CONFIG.workdir,
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
@@ -3784,7 +3835,9 @@ function aliasForSessionId(registry, sessionId) {
 function isSameOrChildPath(child, parent) {
   const childPath = resolve(String(child || ""));
   const parentPath = resolve(String(parent || ""));
-  return childPath === parentPath || childPath.startsWith(`${parentPath}/`);
+  if (childPath === parentPath) return true;
+  const rel = relative(parentPath, childPath);
+  return rel.length > 0 && !rel.startsWith("..");
 }
 
 function formatSessionLog(registry, alias) {
