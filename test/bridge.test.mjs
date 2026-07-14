@@ -61,3 +61,17 @@ test("workspace containment does not accept sibling prefixes", () => {
   assert.equal(isSameOrChildPath("/tmp/work/repo", "/tmp/work"), true);
   assert.equal(isSameOrChildPath("/tmp/work-other", "/tmp/work"), false);
 });
+
+test("workspace containment rejects parent traversal and cross-drive paths", () => {
+  // Reject exact ".." and ".." prefix
+  assert.equal(isSameOrChildPath("/tmp", "/tmp/work"), false);
+  assert.equal(isSameOrChildPath("/tmp/../etc", "/tmp/work"), false);
+  // Accept legitimate paths like "..cache" (not parent traversal)
+  assert.equal(isSameOrChildPath("/tmp/work/..cache", "/tmp/work"), true);
+  // Windows cross-drive: path.win32.relative("C:\\work", "D:\\secret") returns "D:\\secret"
+  // (absolute), which must be rejected
+  if (process.platform === "win32") {
+    assert.equal(isSameOrChildPath("D:\\secret", "C:\\work"), false);
+  }
+});
+

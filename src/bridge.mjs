@@ -5,7 +5,7 @@ import { createHash } from "node:crypto";
 import { appendFileSync, closeSync, existsSync, mkdirSync, openSync, readdirSync, readFileSync, readSync, statSync, writeFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { createServer } from "node:http";
-import { basename, dirname, join, relative, resolve } from "node:path";
+import { basename, dirname, isAbsolute, join, relative, resolve, sep } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 
 const __dirname = dirname(fileURLToPath(import.meta.url));
@@ -55,8 +55,10 @@ function spawnCommand(command, args, options = {}) {
     if (script) {
       return spawn(process.execPath, [script, ...args], winOptions);
     }
-    // No shim found (command may already be an .exe on PATH); fall back to shell.
-    return spawn(command, args, { ...winOptions, shell: true });
+    // No shim found; spawn command directly (no shell). If it's an .exe/.cmd on
+    // PATH, Node will find it. Fail-closed: never use shell:true since these
+    // argument arrays contain untrusted message text and can trigger injection.
+    return spawn(command, args, winOptions);
   }
   return spawn(command, args, options);
 }
@@ -2979,6 +2981,21 @@ function appendLimited(current, chunk, maxBuffer) {
 
 function killProcessGroup(child, signal) {
   if (!child?.pid) return;
+  if (isWindows) {
+    // On Windows, child.kill() only terminates the Node shim, leaving the
+    // native Codex/Claude descendant running. Use taskkill /T to kill the
+    // entire process tree. Ignore errors (process may have already exited).
+    try {
+      spawn("taskkill", ["/PID", String(child.pid), "/T", "/F"], {
+        detached: false,
+        windowsHide: true,
+        stdio: "ignore",
+      });
+    } catch {
+      // Best-effort cleanup only.
+    }
+    return;
+  }
   try {
     process.kill(-child.pid, signal);
   } catch {
@@ -3837,7 +3854,13 @@ function isSameOrChildPath(child, parent) {
   const parentPath = resolve(String(parent || ""));
   if (childPath === parentPath) return true;
   const rel = relative(parentPath, childPath);
-  return rel.length > 0 && !rel.startsWith("..");
+  // On Windows, path.relative("C:\\work", "D:\\secret") returns "D:\\secret"
+  // (absolute), not a relative path. Reject absolute results (cross-drive).
+  // Also reject exact ".." and ".." prefix (parent traversal).
+  if (isAbsolute(rel)) return false;
+  if (rel === "..") return false;
+  if (rel.startsWith(".." + sep)) return false;
+  return rel.length > 0;
 }
 
 function formatSessionLog(registry, alias) {
