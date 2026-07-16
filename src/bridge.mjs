@@ -70,6 +70,8 @@ const CONFIG = {
   claudeExtraArgs: splitArgs(env("LARK_CLAUDE_EXTRA_ARGS", "")),
   claudeSystemPrompt: env("LARK_CLAUDE_SYSTEM_PROMPT", ""),
   claudeSystemPromptFile: env("LARK_CLAUDE_SYSTEM_PROMPT_FILE", ""),
+  outputBlockPatterns: envList("LARK_CODEX_OUTPUT_BLOCK_PATTERNS"),
+  outputBlockFallback: env("LARK_CODEX_OUTPUT_BLOCK_FALLBACK", "这个问题我这边暂时没有相关信息，帮不上忙。"),
   replyInThread: envBool("LARK_CODEX_REPLY_IN_THREAD", true),
   maxReplyChars: Number.parseInt(env("LARK_CODEX_MAX_REPLY_CHARS", "3500"), 10),
   startedReplyEnabled: envBool("LARK_CODEX_STARTED_REPLY_ENABLED", true),
@@ -1262,7 +1264,7 @@ async function runSessionNewTask(event, command) {
   writeFileSync(stderrPath, result.stderr);
   if (result.finalMessage) writeFileSync(responsePath, result.finalMessage);
 
-  const finalMessage = result.finalMessage || (existsSync(responsePath) ? readFileSync(responsePath, "utf8").trim() : tail(result.stdout, 3500).trim());
+  const finalMessage = applyOutputContentPolicy(result.finalMessage || (existsSync(responsePath) ? readFileSync(responsePath, "utf8").trim() : tail(result.stdout, 3500).trim()));
 
   if (result.code !== 0 || !result.threadId) {
     const errorText = tail(result.stderr || result.stdout, 3000);
@@ -1395,7 +1397,7 @@ async function runSessionSendTask(event, command) {
 
   const latestRegistry = loadSessionRegistry();
   const latest = latestRegistry.sessions[command.alias] || session;
-  const finalMessage = result.finalMessage || (existsSync(responsePath) ? readFileSync(responsePath, "utf8").trim() : tail(result.stdout, 3500).trim());
+  const finalMessage = applyOutputContentPolicy(result.finalMessage || (existsSync(responsePath) ? readFileSync(responsePath, "utf8").trim() : tail(result.stdout, 3500).trim()));
 
   latest.status = result.code === 0 ? "idle" : "error";
   latest.updated_at = new Date().toISOString();
@@ -1530,7 +1532,7 @@ async function runP2PAutoReplySessionTask(event, prompt, options = {}) {
 
     const latestRegistry = loadSessionRegistry();
     const latest = latestRegistry.sessions[alias] || session;
-    const finalMessage = result.finalMessage || (existsSync(responsePath) ? readFileSync(responsePath, "utf8").trim() : tail(result.stdout || "", 3500).trim());
+    const finalMessage = applyOutputContentPolicy(result.finalMessage || (existsSync(responsePath) ? readFileSync(responsePath, "utf8").trim() : tail(result.stdout || "", 3500).trim()));
     const hasThread = Boolean(result.threadId || latest.session_id);
     const ok = result.code === 0 && hasThread;
     latest.status = ok ? "idle" : "error";
@@ -1842,10 +1844,10 @@ async function runCodexTask(event, userPrompt, options = {}) {
       return;
     }
 
-    const finalMessage = (result.finalMessage || "").trim()
+    const finalMessage = applyOutputContentPolicy((result.finalMessage || "").trim()
       || (existsSync(responsePath)
         ? readFileSync(responsePath, "utf8").trim()
-        : tail(result.stdout || "", 3500).trim());
+        : tail(result.stdout || "", 3500).trim()));
     const finalPrefix = options.finalPrefix ?? `${engineAssistantLabel()} finished in ${elapsedSec}s.\n\n`;
     writeRunStatus(runDir, { status: "completed", elapsed_sec: elapsedSec, final_message: redactSensitiveSessionText(finalMessage || "") });
     appendRunEvent(runDir, "completed", `Codex 完成，用时 ${elapsedSec}s`);
@@ -3922,6 +3924,30 @@ function redactSensitiveSessionText(value) {
       /((?:密码|口令|密钥|令牌|用户名)\s*(?:是|为|=|:|：)?\s*)(["']?)[^\s,;，；。]+/g,
       "$1[redacted]",
     );
+}
+
+// Compile LARK_CODEX_OUTPUT_BLOCK_PATTERNS once into case-insensitive RegExps.
+// Invalid entries are skipped rather than crashing the bridge.
+const OUTPUT_BLOCK_REGEXPS = (CONFIG.outputBlockPatterns || [])
+  .map((raw) => {
+    try {
+      return new RegExp(raw, "i");
+    } catch {
+      return null;
+    }
+  })
+  .filter(Boolean);
+
+// Last-line content guard: if the model's reply trips any configured forbidden
+// pattern, replace the WHOLE reply with the fallback sentence (never leak the
+// original text or describe why). No-op when no patterns are configured.
+function applyOutputContentPolicy(text) {
+  const s = String(text || "");
+  if (!s || OUTPUT_BLOCK_REGEXPS.length === 0) return s;
+  for (const re of OUTPUT_BLOCK_REGEXPS) {
+    if (re.test(s)) return CONFIG.outputBlockFallback;
+  }
+  return s;
 }
 
 function firstNonEmpty(...values) {
