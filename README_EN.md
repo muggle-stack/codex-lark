@@ -57,6 +57,23 @@ Before starting, enable bot capability, subscribe to `im.message.receive_v1`, gr
 
 Never add colleagues to `LARK_CODEX_OWNER_SENDERS`.
 
+## Engine Selection (Codex / Claude Code)
+
+The bridge supports a pluggable engine, chosen with `LARK_CODEX_ENGINE`:
+
+- `codex` (default): unchanged; drives the Codex CLI (`exec` / `app-server`).
+- `claude`: drives Claude Code with `claude -p --resume` — one process per turn, so there is no long-running daemon and no boot autostart.
+
+```dotenv
+LARK_CODEX_ENGINE=claude
+LARK_CLAUDE_MODEL=sonnet
+LARK_CLAUDE_WORKDIR_BASE=~/.cc-lark
+```
+
+Permission still uses the `LARK_CODEX_SANDBOX` vocabulary, mapped to a neutral level: `read-only` -> readonly, `workspace-write` -> write, `danger-full-access` -> full. On the Claude engine the read-only knowledge agent is enforced by **two layers**: an OS sandbox (bubblewrap, read-only filesystem) plus denied `Write`/`Edit` tools plus credential deny — neither alone is sufficient. Linux needs `bubblewrap` and `socat`.
+
+Each Lark user gets one pre-generated Claude session UUID (`--session-id` first turn, `--resume` after); working directories default to `~/.cc-lark/<open_id>` and transcripts land in `~/.claude/projects/`. See [docs/CONFIGURATION.md](docs/CONFIGURATION.md).
+
 ## Managed Sessions
 
 ```text

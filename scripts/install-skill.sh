@@ -2,9 +2,23 @@
 set -euo pipefail
 
 source "$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)/common.sh"
-SOURCE="$ROOT_DIR/skills/codex-lark"
-CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
-TARGET="$CODEX_HOME_DIR/skills/codex-lark"
+
+# Resolve the engine (env wins, then .env, default codex) to pick which skill to install.
+ENGINE="${LARK_CODEX_ENGINE:-}"
+if [[ -z "$ENGINE" && -f "$ROOT_DIR/.env" ]]; then
+  ENGINE="$(grep -E '^LARK_CODEX_ENGINE=' "$ROOT_DIR/.env" | tail -n1 | cut -d= -f2- | tr -d '[:space:]')"
+fi
+ENGINE="${ENGINE:-codex}"
+
+if [[ "$ENGINE" == "claude" ]]; then
+  SOURCE="$ROOT_DIR/skills/claude-lark"
+  CLAUDE_HOME_DIR="${CLAUDE_CONFIG_DIR:-$HOME/.claude}"
+  TARGET="$CLAUDE_HOME_DIR/skills/claude-lark"
+else
+  SOURCE="$ROOT_DIR/skills/codex-lark"
+  CODEX_HOME_DIR="${CODEX_HOME:-$HOME/.codex}"
+  TARGET="$CODEX_HOME_DIR/skills/codex-lark"
+fi
 FORCE=0
 
 if [[ "${1:-}" == "--force" ]]; then
@@ -29,4 +43,4 @@ if [[ -e "$TARGET" || -L "$TARGET" ]]; then
 fi
 
 ln -s "$SOURCE" "$TARGET"
-echo "installed Codex skill: $TARGET -> $SOURCE"
+echo "installed $ENGINE skill: $TARGET -> $SOURCE"
