@@ -22,6 +22,13 @@ Exact chat mappings use direct P2P polling. Without them, the bridge falls back 
 
 The bridge serializes work through one local queue to avoid concurrent edits in the same workspace.
 
+By default, app-server runs with `LARK_CODEX_APP_SERVER_DISABLE_SELF_MCP=1` to avoid
+starting a recursive `codex mcp-server`; built-in Codex tools and other MCP servers remain available.
+If no item, command, or output event arrives within
+`LARK_CODEX_APP_SERVER_FIRST_ACTIVITY_TIMEOUT_MS` (60 seconds by default) after `turn/start`,
+the bridge terminates the complete child process tree and fails fast instead of blocking the queue
+until the overall timeout.
+
 ## Sandboxes
 
 Public defaults are `workspace-write` for regular work and `read-only` for colleague sessions. Proxy, SSH, or cross-repository workflows may require `danger-full-access`, but this increases the consequence of prompt injection from messages and documents.

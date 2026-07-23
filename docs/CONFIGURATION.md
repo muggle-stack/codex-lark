@@ -22,6 +22,11 @@
 
 所有任务进入同一个本地队列，避免两个 Codex 同时修改同一工作区。
 
+`app-server` 默认通过 `LARK_CODEX_APP_SERVER_DISABLE_SELF_MCP=1` 禁用内部递归的
+`codex mcp-server`，不影响 Codex 内建工具或其他 MCP。若 `turn/start` 后
+`LARK_CODEX_APP_SERVER_FIRST_ACTIVITY_TIMEOUT_MS`（默认 60 秒）内没有任何 item、命令或输出事件，
+bridge 会终止整棵子进程并快速报错，避免占住串行队列直到总超时。
+
 ## Sandbox
 
 公开默认值是普通任务 `workspace-write`、同事知识代理 `read-only`。本地代理、SSH 或跨仓库任务可能需要 `danger-full-access`，但它会放大消息和文档 Prompt Injection 的影响。
