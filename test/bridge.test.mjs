@@ -2,14 +2,39 @@ import assert from "node:assert/strict";
 import test from "node:test";
 
 import {
+  buildCodexAppServerArgs,
   cleanPrompt,
   firstUsefulSessionText,
+  isCodexTurnActivity,
   isSameOrChildPath,
   parseBridgeCommand,
   redactSensitiveSessionText,
   splitArgs,
   splitText,
 } from "../src/bridge.mjs";
+
+test("Codex app-server disables the recursive Codex MCP by default", () => {
+  assert.deepEqual(
+    buildCodexAppServerArgs(),
+    [
+      "-c",
+      'mcp_servers.codex={type="stdio",command="codex",args=["mcp-server"],enabled=false}',
+      "app-server",
+      "--stdio",
+    ],
+  );
+  assert.deepEqual(buildCodexAppServerArgs(false), ["app-server", "--stdio"]);
+});
+
+test("Codex app-server first activity ignores lifecycle-only notifications", () => {
+  assert.equal(isCodexTurnActivity("turn/started"), false);
+  assert.equal(isCodexTurnActivity("error"), false);
+  assert.equal(isCodexTurnActivity("mcpServer/startupStatus/updated"), false);
+  assert.equal(isCodexTurnActivity("item/started"), true);
+  assert.equal(isCodexTurnActivity("item/agentMessage/delta"), true);
+  assert.equal(isCodexTurnActivity("command/exec/outputDelta"), true);
+  assert.equal(isCodexTurnActivity("turn/completed"), true);
+});
 
 test("splitArgs preserves quoted command arguments", () => {
   assert.deepEqual(
@@ -74,4 +99,3 @@ test("workspace containment rejects parent traversal and cross-drive paths", () 
     assert.equal(isSameOrChildPath("D:\\secret", "C:\\work"), false);
   }
 });
-

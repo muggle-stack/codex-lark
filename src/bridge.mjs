@@ -107,6 +107,8 @@ const CONFIG = {
   runViewerSendCard: envBool("LARK_CODEX_RUN_VIEWER_SEND_CARD", true),
   sessionBackend: normalizeSessionBackend(env("LARK_CODEX_SESSION_BACKEND", "app-server")) || "app-server",
   appServerTimeoutMs: Number.parseInt(env("LARK_CODEX_APP_SERVER_TIMEOUT_MS", "1800000"), 10),
+  appServerFirstActivityTimeoutMs: Number.parseInt(env("LARK_CODEX_APP_SERVER_FIRST_ACTIVITY_TIMEOUT_MS", "60000"), 10),
+  appServerDisableSelfMcp: envBool("LARK_CODEX_APP_SERVER_DISABLE_SELF_MCP", true),
   appServerApprovalPolicy: env("LARK_CODEX_APP_SERVER_APPROVAL_POLICY", env("LARK_CODEX_APPROVAL_POLICY", "never")),
   engine: normalizeEngine(env("LARK_CODEX_ENGINE", "codex")),
   botEventsEnabled: envBool("LARK_CODEX_BOT_EVENTS_ENABLED", true),
@@ -274,6 +276,8 @@ async function checkSetup(auth) {
   console.log(`[check] run viewer: ${CONFIG.runViewerEnabled ? `${runViewerBaseUrl()} (${CONFIG.runViewerSendCard ? "card/link" : "state-only"})` : "off"}`);
   console.log(`[check] session backend: ${CONFIG.sessionBackend}`);
   console.log(`[check] app-server approval policy: ${appServerApprovalPolicy() || "(default)"}`);
+  console.log(`[check] app-server self MCP: ${CONFIG.appServerDisableSelfMcp ? "disabled" : "enabled"}`);
+  console.log(`[check] app-server first activity timeout: ${Math.round(effectiveAppServerFirstActivityTimeoutMs() / 1000)}s`);
   console.log(`[check] reply mode: ${CONFIG.replyInThread ? "thread" : "chat"}`);
   console.log(`[check] started reply: ${CONFIG.startedReplyEnabled ? "on" : "off"}`);
   console.log(`[check] started reaction: ${CONFIG.startedReactionEnabled ? `${CONFIG.startedReactionAs}:${CONFIG.startedReaction || "(none)"}` : "off"}`);
@@ -3302,10 +3306,11 @@ function buildAppServerUserInput(prompt, images = []) {
 
 function runCodexAppServerTurn(options) {
   return new Promise((resolvePromise) => {
-    const child = spawnCommand("codex", ["app-server", "--stdio"], {
+    const child = spawnCommand("codex", buildCodexAppServerArgs(CONFIG.appServerDisableSelfMcp), {
       cwd: options.cwd || CONFIG.workdir,
       env: process.env,
       stdio: ["pipe", "pipe", "pipe"],
+      detached: true,
     });
 
     let stdout = "";
@@ -3321,6 +3326,7 @@ function runCodexAppServerTurn(options) {
     const pending = new Map();
     const agentDeltas = new Map();
     let lastAgentDeltaProgressAt = 0;
+    let firstTurnActivityTimer = null;
     const timeoutMs = Number.isFinite(CONFIG.appServerTimeoutMs) && CONFIG.appServerTimeoutMs > 0
       ? CONFIG.appServerTimeoutMs
       : 1_800_000;
@@ -3394,6 +3400,7 @@ function runCodexAppServerTurn(options) {
         throw new Error("codex app-server did not return a thread id");
       }
 
+      armFirstTurnActivityTimer();
       const turn = await sendRequest("turn/start", withoutNullish({
         threadId: activeThreadId,
         cwd: options.cwd || CONFIG.workdir,
@@ -3466,6 +3473,9 @@ function runCodexAppServerTurn(options) {
     }
 
     function handleNotification(method, params) {
+      if (isCodexTurnActivity(method)) {
+        clearFirstTurnActivityTimer();
+      }
       if (method === "error") {
         lastError = params?.message || JSON.stringify(params);
         reportProgress(`遇到错误：${lastError}`);
@@ -3519,6 +3529,22 @@ function runCodexAppServerTurn(options) {
       }
     }
 
+    function armFirstTurnActivityTimer() {
+      clearFirstTurnActivityTimer();
+      const firstActivityTimeoutMs = effectiveAppServerFirstActivityTimeoutMs();
+      firstTurnActivityTimer = setTimeout(() => {
+        const seconds = Math.round(firstActivityTimeoutMs / 1000);
+        reportProgress(`Codex 启动超时：${seconds}s 内没有执行事件`);
+        finish(124, `codex app-server produced no turn activity within ${seconds}s; MCP startup may be stuck`);
+      }, firstActivityTimeoutMs);
+    }
+
+    function clearFirstTurnActivityTimer() {
+      if (!firstTurnActivityTimer) return;
+      clearTimeout(firstTurnActivityTimer);
+      firstTurnActivityTimer = null;
+    }
+
     function reportProgress(message) {
       if (typeof options.onProgress !== "function") return;
       const text = compactProgressText(message);
@@ -3555,6 +3581,7 @@ function runCodexAppServerTurn(options) {
       if (finished) return;
       finished = true;
       clearTimeout(overallTimer);
+      clearFirstTurnActivityTimer();
       for (const [, pendingRequest] of pending) {
         pendingRequest.reject(new Error(error || "codex app-server finished before request completed"));
       }
@@ -3564,7 +3591,8 @@ function runCodexAppServerTurn(options) {
         lastAgentMessage = Array.from(agentDeltas.values()).at(-1) || "";
       }
       if (child.exitCode === null && !child.killed) {
-        child.kill("SIGTERM");
+        killProcessGroup(child, "SIGTERM");
+        setTimeout(() => killProcessGroup(child, "SIGKILL"), 5000).unref();
       }
       const errorText = lastError ? `${stderr}${stderr.endsWith("\n") || !stderr ? "" : "\n"}${lastError}\n` : stderr;
       resolvePromise({
@@ -4224,6 +4252,33 @@ function normalizeSessionBackend(value) {
   return "";
 }
 
+function buildCodexAppServerArgs(disableSelfMcp = true) {
+  const args = [];
+  if (disableSelfMcp) {
+    // Keep the override valid even when the user's config has no `codex` MCP entry.
+    args.push(
+      "-c",
+      'mcp_servers.codex={type="stdio",command="codex",args=["mcp-server"],enabled=false}',
+    );
+  }
+  args.push("app-server", "--stdio");
+  return args;
+}
+
+function isCodexTurnActivity(method) {
+  const value = String(method || "");
+  return value === "turn/completed"
+    || value.startsWith("item/")
+    || value.startsWith("command/")
+    || value.startsWith("process/");
+}
+
+function effectiveAppServerFirstActivityTimeoutMs() {
+  return Number.isFinite(CONFIG.appServerFirstActivityTimeoutMs) && CONFIG.appServerFirstActivityTimeoutMs > 0
+    ? CONFIG.appServerFirstActivityTimeoutMs
+    : 60_000;
+}
+
 function normalizeSandboxMode(value) {
   const sandbox = String(value || "").trim();
   return ["read-only", "workspace-write", "danger-full-access"].includes(sandbox) ? sandbox : null;
@@ -4553,6 +4608,8 @@ function printStartup(auth) {
   console.log(`[bridge] dynamic card: ${CONFIG.dynamicCardEnabled ? `on, interval=${effectiveDynamicCardUpdateIntervalMs() / 1000}s, max-events=${effectiveDynamicCardMaxEvents()}` : "off"}`);
   console.log(`[bridge] session backend: ${CONFIG.sessionBackend}`);
   console.log(`[bridge] app-server approval policy: ${appServerApprovalPolicy() || "(default)"}`);
+  console.log(`[bridge] app-server self MCP: ${CONFIG.appServerDisableSelfMcp ? "disabled" : "enabled"}`);
+  console.log(`[bridge] app-server first activity timeout: ${Math.round(effectiveAppServerFirstActivityTimeoutMs() / 1000)}s`);
   console.log(`[bridge] reply mode: ${CONFIG.replyInThread ? "thread" : "chat"}`);
   console.log(`[bridge] started reply: ${CONFIG.startedReplyEnabled ? "on" : "off"}`);
   console.log(`[bridge] started reaction: ${CONFIG.startedReactionEnabled ? `${CONFIG.startedReactionAs}:${CONFIG.startedReaction || "(none)"}` : "off"}`);
@@ -4710,9 +4767,11 @@ function escapeRegExp(text) {
 }
 
 export {
+  buildCodexAppServerArgs,
   cleanPrompt,
   extractMessageText,
   firstUsefulSessionText,
+  isCodexTurnActivity,
   isSameOrChildPath,
   parseBridgeCommand,
   redactSensitiveSessionText,
