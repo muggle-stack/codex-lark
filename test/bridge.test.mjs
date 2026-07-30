@@ -13,8 +13,10 @@ import {
   inspectArtifactDirectory,
   isCodexTurnActivity,
   isSameOrChildPath,
+  isUnauthorizedKnowledgeTriggerText,
   parseBridgeCommand,
   redactSensitiveSessionText,
+  stripLeadingTrigger,
   splitArgs,
   splitText,
 } from "../src/bridge.mjs";
@@ -40,6 +42,35 @@ test("Codex app-server first activity ignores lifecycle-only notifications", () 
   assert.equal(isCodexTurnActivity("item/agentMessage/delta"), true);
   assert.equal(isCodexTurnActivity("command/exec/outputDelta"), true);
   assert.equal(isCodexTurnActivity("turn/completed"), true);
+});
+
+test("P2P trigger matches only a complete command at the start", () => {
+  const triggers = ["/troy", "/codex"];
+
+  assert.equal(stripLeadingTrigger("/troy hi", triggers), "hi");
+  assert.equal(stripLeadingTrigger(" \n/troy\t hi ", triggers), "hi");
+  assert.equal(stripLeadingTrigger("/troy\nsecond line", triggers), "second line");
+  assert.equal(stripLeadingTrigger("/troy", triggers), "");
+  assert.equal(stripLeadingTrigger("/codex inspect", triggers), "inspect");
+
+  assert.equal(stripLeadingTrigger("你好/troy.", triggers), null);
+  assert.equal(stripLeadingTrigger("prefix /troy hi", triggers), null);
+  assert.equal(stripLeadingTrigger("/troyish hi", triggers), null);
+  assert.equal(stripLeadingTrigger("/troy. hi", triggers), null);
+  assert.equal(stripLeadingTrigger("/TROY hi", triggers), null);
+});
+
+test("unauthorized reply uses the same start and boundary rules", () => {
+  const triggers = ["/troy"];
+
+  assert.equal(isUnauthorizedKnowledgeTriggerText("/troy hi", triggers), true);
+  assert.equal(isUnauthorizedKnowledgeTriggerText("  /troy\nhi", triggers), true);
+  assert.equal(isUnauthorizedKnowledgeTriggerText("/troy", triggers), true);
+
+  assert.equal(isUnauthorizedKnowledgeTriggerText("你好/troy.", triggers), false);
+  assert.equal(isUnauthorizedKnowledgeTriggerText("prefix /troy hi", triggers), false);
+  assert.equal(isUnauthorizedKnowledgeTriggerText("/troyish hi", triggers), false);
+  assert.equal(isUnauthorizedKnowledgeTriggerText("/troy. hi", triggers), false);
 });
 
 test("artifact sandbox narrows writes to the per-run drop box", () => {

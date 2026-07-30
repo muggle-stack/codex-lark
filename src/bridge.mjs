@@ -3011,11 +3011,16 @@ function isImageResourceDescriptor(resource) {
 function stripP2PTrigger(text) {
   const trimmed = String(text || "").trim();
   if (!CONFIG.p2pAutoReplyRequireTrigger) return trimmed;
-  for (const trigger of effectiveP2PTriggers()) {
-    if (!trigger) continue;
-    if (trimmed.startsWith(trigger)) {
-      return cleanPrompt(trimmed.slice(trigger.length));
-    }
+  return stripLeadingTrigger(trimmed, effectiveP2PTriggers());
+}
+
+function stripLeadingTrigger(text, triggers) {
+  const trimmed = String(text || "").trim();
+  for (const trigger of sortedTriggers(triggers || [])) {
+    if (!trimmed.startsWith(trigger)) continue;
+    const remainder = trimmed.slice(trigger.length);
+    if (remainder && !/^\s/u.test(remainder)) continue;
+    return cleanPrompt(remainder);
   }
   return null;
 }
@@ -3068,9 +3073,8 @@ function effectiveP2PUnauthorizedReplyTriggers() {
   return sortedTriggers(triggers);
 }
 
-function isUnauthorizedKnowledgeTriggerText(text) {
-  const value = String(text || "").trim();
-  return Boolean(value && effectiveP2PUnauthorizedReplyTriggers().some((trigger) => value.includes(trigger)));
+function isUnauthorizedKnowledgeTriggerText(text, triggers = effectiveP2PUnauthorizedReplyTriggers()) {
+  return stripLeadingTrigger(text, triggers) !== null;
 }
 
 function sortedTriggers(triggers) {
@@ -5044,8 +5048,10 @@ export {
   inspectArtifactDirectory,
   isCodexTurnActivity,
   isSameOrChildPath,
+  isUnauthorizedKnowledgeTriggerText,
   parseBridgeCommand,
   redactSensitiveSessionText,
+  stripLeadingTrigger,
   splitArgs,
   splitText,
 };
