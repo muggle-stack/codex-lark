@@ -33,6 +33,23 @@ bridge 会终止整棵子进程并快速报错，避免占住串行队列直到�
 
 知识代理 Prompt 会禁止写入和私有 Skill 导出,但在 Codex 引擎下这不是操作系统级隔离(Claude 引擎见下)。
 
+### 只读知识代理的附件投递箱
+
+`LARK_CODEX_P2P_ARTIFACTS_ENABLED=1` 可为每次 P2P app-server 运行创建
+`.lark-codex/runs/<run_id>/artifacts/`。bridge 在 `turn/start` 时把 Codex 的 runtime workspace roots
+替换为这个目录，并使用关闭网络、排除 `/tmp`/`$TMPDIR` 的 `workspaceWrite` sandbox policy。
+因此源工作区仍不可写，只有本次运行的空投递箱可写。
+
+该功能只支持 `codex` + `per_sender` + `app-server` + `read-only` 组合。bridge 只上传投递箱
+顶层的普通文本文件，拒绝子目录、符号链接、硬链接、隐藏文件、越界路径、超大/超量文件、
+无效 UTF-8、疑似凭据和命中输出策略的内容。通过校验的内容会先复制到 Codex 不可写的宿主侧
+暂存目录，再由 `lark-cli` 上传，避免校验后被替换。公开默认仅允许 `.md`；可在
+`.md,.txt,.csv,.json` 的硬限制内用 `LARK_CODEX_P2P_ARTIFACT_EXTENSIONS` 缩放允许列表。
+数量和单文件大小还有 10 个、10 MiB 的硬上限（公开默认分别为 3 个、1 MiB）。
+
+附件投递箱不开放网络，也不允许修改邮件库等外部数据源。类似 `lei up` 的同步操作应由受信任的
+宿主机定时任务完成；知识代理只读取已同步数据并把最终报告写入投递箱。
+
 ## 引擎选择(LARK_CODEX_ENGINE)
 
 用 `LARK_CODEX_ENGINE` 选择后端,默认 `codex`。
