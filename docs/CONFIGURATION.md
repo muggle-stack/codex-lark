@@ -27,6 +27,28 @@
 `LARK_CODEX_APP_SERVER_FIRST_ACTIVITY_TIMEOUT_MS`（默认 60 秒）内没有任何 item、命令或输出事件，
 bridge 会终止整棵子进程并快速报错，避免占住串行队列直到总超时。
 
+## 安全重启与中断恢复
+
+收到 `SIGTERM`/`SIGINT` 后，bridge 会先停止事件消费和 P2P 轮询，不再接收新任务；随后检查当前
+活动任务、排队任务和状态卡更新，并等待它们全部完成后才退出。日志中的
+`pre-restart active task check` 会显示 drain 前的任务快照。
+
+`LARK_CODEX_SHUTDOWN_DRAIN_TIMEOUT_MS=0` 表示 bridge 自身不设置强制退出时限，由 systemd 的
+`TimeoutStopSec` 等外层机制决定硬超时。若外层最终发送 `SIGKILL`，P2P `per_sender` 任务会依靠
+每个 run 的 `recovery.json` 在下次启动恢复：
+
+- Codex thread 创建或恢复成功后立即持久化 thread ID，不再等整轮结束。
+- 执行阶段被中断时恢复同一个 thread；尚未获得 thread ID 时重新执行原任务。
+- 已执行完成但尚未回复或上传附件时只恢复发送阶段，不重复生成内容。
+- 回复和附件继续使用原事件的幂等键；已移出白名单的发送者不会被恢复。
+
+可用 `LARK_CODEX_RECOVER_INTERRUPTED_TASKS=0` 禁用启动恢复，但正常部署建议保持默认值 `1`。
+
+systemd 单元建议配置 `KillMode=mixed`：停止时先只向主 bridge 进程发送 `SIGTERM`，给它机会完成
+drain；超过 `TimeoutStopSec` 后再用 `SIGKILL` 清理整个 cgroup。若使用默认
+`KillMode=control-group`，Codex 子进程会与 bridge 同时收到 `SIGTERM`；bridge 会把这种退出保留为
+可恢复中断而不是业务失败，但该轮仍需在新进程中续跑。
+
 ## Sandbox
 
 公开默认值是普通任务 `workspace-write`、同事知识代理 `read-only`。本地代理、SSH 或跨仓库任务可能需要 `danger-full-access`，但它会放大消息和文档 Prompt Injection 的影响。
@@ -101,6 +123,7 @@ LARK_CODEX_KNOWLEDGE_BASE_HINT=Use the configured Wiki skill and lark-cli --as u
 `.lark-codex/` 中保存：
 
 - `runs/<run_id>/status.json` 和 `events.jsonl`：脱敏进度状态
+- `runs/<run_id>/recovery.json`：可恢复 P2P 任务的阶段、thread ID 和投递上下文
 - `sessions.json`：Session 别名注册表
 - `p2p-auto-reply-state.json`：已处理消息 ID
 - 日志和 PID 文件

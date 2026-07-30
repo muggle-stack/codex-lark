@@ -29,6 +29,37 @@ If no item, command, or output event arrives within
 the bridge terminates the complete child process tree and fails fast instead of blocking the queue
 until the overall timeout.
 
+## Safe Restarts and Interrupted-Task Recovery
+
+On `SIGTERM` or `SIGINT`, the bridge first stops event consumption and P2P polling
+so no new work is accepted. It then checks the active task, queued tasks, and
+in-flight status-card updates, and exits only after they drain. The
+`pre-restart active task check` log line records the pre-drain snapshot.
+
+`LARK_CODEX_SHUTDOWN_DRAIN_TIMEOUT_MS=0` gives the bridge no internal hard
+deadline; the outer service manager, such as systemd `TimeoutStopSec`, owns that
+limit. If the manager eventually sends `SIGKILL`, P2P `per_sender` work is
+recovered from each run's `recovery.json` on the next startup:
+
+- A Codex thread ID is persisted immediately after thread start or resume,
+  instead of waiting for the whole turn to finish.
+- An interrupted execution resumes the same thread; a task without a captured
+  thread ID restarts from its original request.
+- A completed execution interrupted during reply or artifact upload resumes
+  delivery only and does not regenerate the result.
+- Replies and files retain the original event idempotency keys, and tasks for a
+  sender removed from the allowlist are not resumed.
+
+Set `LARK_CODEX_RECOVER_INTERRUPTED_TASKS=0` to disable startup recovery. Keeping
+the default value of `1` is recommended.
+
+For systemd, configure `KillMode=mixed`. This sends the initial `SIGTERM` only
+to the main bridge process so it can drain, then uses `SIGKILL` for the entire
+cgroup after `TimeoutStopSec`. With the default `KillMode=control-group`, the
+Codex child receives `SIGTERM` at the same time as the bridge. The bridge records
+that exit as a recoverable interruption rather than a task failure, but the turn
+must still continue in the replacement process.
+
 ## Sandboxes
 
 Public defaults are `workspace-write` for regular work and `read-only` for colleague sessions. Proxy, SSH, or cross-repository workflows may require `danger-full-access`, but this increases the consequence of prompt injection from messages and documents.
@@ -73,4 +104,7 @@ Keep personal names, Lark IDs, Wiki tokens, workspace paths, actual Skills, and 
 
 ## Local State
 
-`.lark-codex/` stores redacted run state, session aliases, processed message IDs, logs, and PID files. Downloaded message resources are stored under `lark-im-resources/`. Both locations are ignored by Git.
+`.lark-codex/` stores redacted status state, private per-run `recovery.json`
+journals (including the original request required for restart), session aliases,
+processed message IDs, logs, and PID files. Downloaded message resources are
+stored under `lark-im-resources/`. Both locations are ignored by Git.
