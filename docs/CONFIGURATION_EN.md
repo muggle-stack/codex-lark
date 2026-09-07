@@ -29,11 +29,66 @@ If no item, command, or output event arrives within
 the bridge terminates the complete child process tree and fails fast instead of blocking the queue
 until the overall timeout.
 
+## Safe Restarts and Interrupted-Task Recovery
+
+On `SIGTERM` or `SIGINT`, the bridge first stops event consumption and P2P polling
+so no new work is accepted. It then checks the active task, queued tasks, and
+in-flight status-card updates, and exits only after they drain. The
+`pre-restart active task check` log line records the pre-drain snapshot.
+
+`LARK_CODEX_SHUTDOWN_DRAIN_TIMEOUT_MS=0` gives the bridge no internal hard
+deadline; the outer service manager, such as systemd `TimeoutStopSec`, owns that
+limit. If the manager eventually sends `SIGKILL`, P2P `per_sender` work is
+recovered from each run's `recovery.json` on the next startup:
+
+- A Codex thread ID is persisted immediately after thread start or resume,
+  instead of waiting for the whole turn to finish.
+- An interrupted execution resumes the same thread; a task without a captured
+  thread ID restarts from its original request.
+- A completed execution interrupted during reply or artifact upload resumes
+  delivery only and does not regenerate the result.
+- Replies and files retain the original event idempotency keys, and tasks for a
+  sender removed from the allowlist are not resumed.
+
+Set `LARK_CODEX_RECOVER_INTERRUPTED_TASKS=0` to disable startup recovery. Keeping
+the default value of `1` is recommended.
+
+For systemd, configure `KillMode=mixed`. This sends the initial `SIGTERM` only
+to the main bridge process so it can drain, then uses `SIGKILL` for the entire
+cgroup after `TimeoutStopSec`. With the default `KillMode=control-group`, the
+Codex child receives `SIGTERM` at the same time as the bridge. The bridge records
+that exit as a recoverable interruption rather than a task failure, but the turn
+must still continue in the replacement process.
+
 ## Sandboxes
 
 Public defaults are `workspace-write` for regular work and `read-only` for colleague sessions. Proxy, SSH, or cross-repository workflows may require `danger-full-access`, but this increases the consequence of prompt injection from messages and documents.
 
 Knowledge-agent instructions prohibit writes and private Skill extraction. They are defense in depth, not an operating-system isolation boundary.
+
+### Artifact drop box for read-only knowledge agents
+
+Set `LARK_CODEX_P2P_ARTIFACTS_ENABLED=1` to create
+`.lark-codex/runs/<run_id>/artifacts/` for each P2P app-server run. At `turn/start`,
+the bridge replaces the Codex runtime workspace roots with that directory and uses
+a `workspaceWrite` sandbox policy with networking, `/tmp`, and `$TMPDIR` writes
+disabled. The source workspace therefore stays read-only while the empty per-run
+drop box is writable.
+
+This requires the `codex` + `per_sender` + `app-server` + `read-only` combination.
+The bridge uploads only top-level regular text files from the drop box. It rejects
+directories, symbolic and hard links, hidden files, path escapes, oversized or
+excess files, invalid UTF-8, suspected credentials, and content blocked by the
+output policy. Validated bytes are copied into a host-side staging directory
+that Codex cannot write before `lark-cli` uploads them, preventing replacement
+after validation. The public default permits only `.md`;
+`LARK_CODEX_P2P_ARTIFACT_EXTENSIONS` may narrow or expand that list within the
+hard limit of `.md,.txt,.csv,.json`. File count and per-file size are also
+hard-capped at 10 files and 10 MiB (public defaults: 3 files and 1 MiB).
+
+The drop box does not enable networking or writes to external data sources. Run
+updates such as `lei up` in a trusted host-side timer, then let the knowledge agent
+read the synchronized data and write only the final report into the drop box.
 
 ## Branding and Knowledge Sources
 
@@ -49,4 +104,7 @@ Keep personal names, Lark IDs, Wiki tokens, workspace paths, actual Skills, and 
 
 ## Local State
 
-`.lark-codex/` stores redacted run state, session aliases, processed message IDs, logs, and PID files. Downloaded message resources are stored under `lark-im-resources/`. Both locations are ignored by Git.
+`.lark-codex/` stores redacted status state, private per-run `recovery.json`
+journals (including the original request required for restart), session aliases,
+processed message IDs, logs, and PID files. Downloaded message resources are
+stored under `lark-im-resources/`. Both locations are ignored by Git.
